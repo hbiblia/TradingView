@@ -63,13 +63,15 @@ pub enum UiMode {
     Config,
     /// Overlay al inicio: sesiones anteriores encontradas
     /// Vec<(symbol, direction, trade_count)>
-    RestoreSession(Vec<(String, Direction, usize)>),
+    RestoreSession(Vec<(String, Direction, usize, bool)>),
     /// Modal para lanzar una nueva estrategia (S)
     NewStrategy,
     /// Overlay post-venta: muestra resultado de un slot específico
     PostSale(usize, SaleResult),
     /// Confirmación de cierre manual de posición (V)
     ConfirmClose,
+    /// Confirmación de borrado de slot (D)
+    ConfirmDelete,
 }
 
 /// Mensajes que el UI puede enviar al motor de estrategia
@@ -80,7 +82,8 @@ pub enum AppCommand {
     // --- Navegación de slots ---
     SlotSelectUp,
     SlotSelectDown,
-    StopSelected,
+    ToggleStartStopSelected,
+    ToggleAutoFlip,
 
     // --- Modal nueva estrategia (S) ---
     OpenNewStrategy,
@@ -88,6 +91,8 @@ pub enum AppCommand {
     NewStratSymbolDown,
     NewStratToggleDirection,      // Tab: alterna LONG/SHORT
     NewStratToggleAutoRestart,    // ←/→: alterna manual/auto
+    NewStratToggleAutoFlip,       // F: alterna auto-flip
+    NewStratToggleBnb,            // B: alterna uso de BNB para fees
     NewStratConfirm,              // Enter: crear y lanzar
     NewStratCancel,               // Esc: cancelar
 
@@ -105,10 +110,15 @@ pub enum AppCommand {
     CfgInputChar(char),
     CfgBackspace,
     CfgConfirm,
+    CfgToggleBnb,
 
     // --- Cierre manual de posición (V) ---
     OpenConfirmClose,   // V: pide confirmación
     ConfirmCloseNow,    // Enter: ejecuta el cierre a mercado
+
+    // --- Borrado de slot (D) ---
+    OpenConfirmDelete,
+    ConfirmDeleteNow,
 }
 
 /// Estado compartido entre el UI y el motor de estrategia
@@ -132,9 +142,12 @@ pub struct AppState {
     pub new_strat_symbol_idx: usize,
     pub new_strat_direction: Direction,
     pub new_strat_auto_restart: bool,
+    pub new_strat_auto_flip: bool,
+    pub new_strat_has_bnb: bool,
 
     // --- Panel de configuración ---
     pub cfg_amount_buf: String,
+    pub cfg_has_bnb: bool,
 
     /// Próximo ID de slot (auto-incremental)
     pub next_slot_id: usize,
@@ -224,5 +237,11 @@ impl AppState {
         let id = self.next_slot_id;
         self.next_slot_id += 1;
         id
+    }
+
+    pub fn selected_slot_is_active(&self) -> bool {
+        self.selected()
+            .map(|s| s.strategy.state.is_active())
+            .unwrap_or(false)
     }
 }

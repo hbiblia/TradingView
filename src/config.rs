@@ -11,6 +11,15 @@ pub enum Direction {
     Short,
 }
 
+impl Direction {
+    pub fn flip(&self) -> Self {
+        match self {
+            Direction::Long  => Direction::Short,
+            Direction::Short => Direction::Long,
+        }
+    }
+}
+
 impl Default for Direction {
     fn default() -> Self {
         Direction::Long
@@ -86,6 +95,12 @@ pub struct DcaConfig {
     /// Restart DCA cycle automatically after a TP/Trailing TP (true/false)
     /// If false, the bot shows an overlay and waits for user decision
     pub auto_restart: bool,
+    /// If auto_restart is true, automatically flip direction (Long <-> Short) after a TP
+    #[serde(default)]
+    pub auto_flip: bool,
+    /// Use BNB for commissions (applies 25% discount logic if true)
+    #[serde(default)]
+    pub has_bnb_balance: bool,
 }
 
 #[derive(Debug, Deserialize, Clone)]

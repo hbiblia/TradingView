@@ -5,7 +5,8 @@ use crate::config::{DcaConfig, Direction};
 use crate::models::order::DcaTrade;
 
 /// DCA strategy state
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DcaState {
     /// Stopped / waiting for manual start
     Idle,
@@ -98,19 +99,24 @@ impl DcaStrategy {
         self.trades.iter().map(|t| t.quantity).sum()
     }
 
-    /// Absolute P&L in USDT at current price
-    /// LONG:  profit when price rises  (current_value - cost)
-    /// SHORT: profit when price falls  (cost - current_value)
+    /// Absolute P&L in USDT at current price, including estimated fees (0.2% total)
+    /// LONG:  (current_value * 0.999) - invested
+    /// SHORT: invested - (current_value * 1.001)
     pub fn pnl(&self, current_price: f64) -> f64 {
-        let current_value = self.total_quantity() * current_price;
+        let total_qty = self.total_quantity();
+        if total_qty == 0.0 { return 0.0; }
+        
+        let current_value = total_qty * current_price;
         let invested = self.total_invested();
+        
+        // Estimamos un 0.1% de comisión para la orden de cierre
         match self.config.direction {
-            Direction::Long  => current_value - invested,
-            Direction::Short => invested - current_value,
+            Direction::Long  => (current_value * 0.999) - invested,
+            Direction::Short => invested - (current_value * 1.001),
         }
     }
 
-    /// P&L in percentage
+    /// P&L in percentage (net of fees)
     pub fn pnl_pct(&self, current_price: f64) -> f64 {
         let invested = self.total_invested();
         if invested == 0.0 {
@@ -159,15 +165,12 @@ impl DcaStrategy {
             return false;
         }
 
-        // First entry: immediate
-        if self.last_buy_time.is_none() {
-            return true;
-        }
-
         // Trigger por tiempo
-        let elapsed = now
-            .signed_duration_since(self.last_buy_time.unwrap())
-            .num_minutes();
+        let last_time = match self.last_buy_time {
+            Some(t) => t,
+            None => return false,
+        };
+        let elapsed = now.signed_duration_since(last_time).num_minutes();
         if elapsed >= self.config.interval_minutes as i64 {
             return true;
         }
@@ -228,19 +231,20 @@ impl DcaStrategy {
         match self.config.direction {
             Direction::Long => {
                 if self.price_peak <= avg {
-                    return false; // nunca estuvo en ganancia
+                    return false;
                 }
                 let drop_from_peak =
                     ((self.price_peak - current_price) / self.price_peak) * 100.0;
-                drop_from_peak >= self.config.trailing_tp_pct && current_price > avg
+                // Debería cerrar si bajó lo suficiente Y todavía estamos en ganancia neta (mínimo 0.05% de margen tras fees)
+                drop_from_peak >= self.config.trailing_tp_pct && self.pnl_pct(current_price) > 0.05
             }
             Direction::Short => {
                 if self.price_trough >= avg || self.price_trough == f64::MAX {
-                    return false; // never was in profit
+                    return false;
                 }
                 let rise_from_trough =
                     ((current_price - self.price_trough) / self.price_trough) * 100.0;
-                rise_from_trough >= self.config.trailing_tp_pct && current_price < avg
+                rise_from_trough >= self.config.trailing_tp_pct && self.pnl_pct(current_price) > 0.05
             }
         }
     }
@@ -273,15 +277,7 @@ impl DcaStrategy {
         if self.trades.is_empty() || self.config.take_profit_pct <= 0.0 {
             return false;
         }
-        let avg = self.average_cost();
-        if avg == 0.0 {
-            return false;
-        }
-        let gain_pct = match self.config.direction {
-            Direction::Long  => ((current_price - avg) / avg) * 100.0,
-            Direction::Short => ((avg - current_price) / avg) * 100.0,
-        };
-        gain_pct >= self.config.take_profit_pct
+        self.pnl_pct(current_price) >= self.config.take_profit_pct
     }
 
     /// Decides if stop loss should be activated (close position)
@@ -307,6 +303,10 @@ impl DcaStrategy {
     // -----------------------------------------------------------
 
     pub fn start(&mut self) {
+        // Reset the interval timer whenever we start or restart the strategy
+        if self.state != DcaState::Running {
+            self.last_buy_time = Some(Utc::now());
+        }
         self.state = DcaState::Running;
     }
 
@@ -351,7 +351,6 @@ impl DcaStrategy {
         format!("{:02}:{:02}", secs / 60, secs % 60)
     }
 
-    /// Creates a snapshot of current state for persistence
     pub fn to_snapshot(&self, symbol: &str) -> StrategySnapshot {
         StrategySnapshot {
             symbol: symbol.to_string(),
@@ -363,12 +362,15 @@ impl DcaStrategy {
             last_reset_day: self.last_reset_day,
             price_peak: self.price_peak,
             price_trough: self.price_trough,
+            has_bnb_balance: self.config.has_bnb_balance,
+            state: self.state.clone(),
         }
     }
 
-    /// Restores state from a snapshot (state remains Idle for safety)
+    /// Restores state from a snapshot
     pub fn restore_from_snapshot(&mut self, snapshot: StrategySnapshot) {
         self.config.direction = snapshot.direction;
+        self.config.has_bnb_balance = snapshot.has_bnb_balance;
         self.trades = snapshot.trades;
         self.last_buy_time = snapshot.last_buy_time;
         self.last_buy_price = snapshot.last_buy_price;
@@ -376,7 +378,7 @@ impl DcaStrategy {
         self.last_reset_day = snapshot.last_reset_day;
         self.price_peak = snapshot.price_peak;
         self.price_trough = snapshot.price_trough;
-        // state remains Idle — user must reactivate manually
+        self.state = snapshot.state;
     }
 }
 
@@ -400,6 +402,16 @@ pub struct StrategySnapshot {
     pub price_peak: f64,
     #[serde(default = "default_trough")]
     pub price_trough: f64,
+    /// If true, use BNB for fees (lower fee calculations possible)
+    #[serde(default)]
+    pub has_bnb_balance: bool,
+    /// Current state of the strategy
+    #[serde(default = "default_state")]
+    pub state: DcaState,
+}
+
+fn default_state() -> DcaState {
+    DcaState::Idle
 }
 
 fn default_trough() -> f64 {

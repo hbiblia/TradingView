@@ -126,6 +126,12 @@ impl Tui {
                 KeyCode::Left | KeyCode::Right | KeyCode::Char('h') | KeyCode::Char('l') => {
                     let _ = self.cmd_tx.send(AppCommand::NewStratToggleAutoRestart).await;
                 }
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    let _ = self.cmd_tx.send(AppCommand::NewStratToggleAutoFlip).await;
+                }
+                KeyCode::Char('b') | KeyCode::Char('B') => {
+                    let _ = self.cmd_tx.send(AppCommand::NewStratToggleBnb).await;
+                }
                 _ => {}
             },
 
@@ -136,6 +142,9 @@ impl Tui {
                 }
                 KeyCode::Enter => {
                     let _ = self.cmd_tx.send(AppCommand::CfgConfirm).await;
+                }
+                KeyCode::Char('b') | KeyCode::Char('B') => {
+                    let _ = self.cmd_tx.send(AppCommand::CfgToggleBnb).await;
                 }
                 KeyCode::Char(c) => {
                     let _ = self.cmd_tx.send(AppCommand::CfgInputChar(c)).await;
@@ -150,6 +159,16 @@ impl Tui {
             UiMode::ConfirmClose => match code {
                 KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
                     let _ = self.cmd_tx.send(AppCommand::ConfirmCloseNow).await;
+                }
+                _ => {
+                    let _ = self.cmd_tx.send(AppCommand::CloseConfig).await;
+                }
+            },
+
+            // ----------------------------------------------------------------
+            UiMode::ConfirmDelete => match code {
+                KeyCode::Enter | KeyCode::Char('y') | KeyCode::Char('Y') => {
+                    let _ = self.cmd_tx.send(AppCommand::ConfirmDeleteNow).await;
                 }
                 _ => {
                     let _ = self.cmd_tx.send(AppCommand::CloseConfig).await;
@@ -173,13 +192,21 @@ impl Tui {
                         let _ = self.cmd_tx.send(AppCommand::OpenNewStrategy).await;
                     }
                 }
-                // Detener slot seleccionado (sin cerrar posición)
+                // Iniciar/Detener slot seleccionado (X)
                 KeyCode::Char('x') | KeyCode::Char('X') => {
-                    let _ = self.cmd_tx.send(AppCommand::StopSelected).await;
+                    let _ = self.cmd_tx.send(AppCommand::ToggleStartStopSelected).await;
                 }
                 // Cerrar posición a mercado ahora (pide confirmación)
                 KeyCode::Char('v') | KeyCode::Char('V') => {
                     let _ = self.cmd_tx.send(AppCommand::OpenConfirmClose).await;
+                }
+                // Borrar slot seleccionado (Delete o D)
+                KeyCode::Char('d') | KeyCode::Char('D') | KeyCode::Delete => {
+                    let _ = self.cmd_tx.send(AppCommand::OpenConfirmDelete).await;
+                }
+                // Alternar Auto-Flip
+                KeyCode::Char('f') | KeyCode::Char('F') => {
+                    let _ = self.cmd_tx.send(AppCommand::ToggleAutoFlip).await;
                 }
                 // Configuración (monto)
                 KeyCode::Char('c') | KeyCode::Char('C') => {
@@ -268,6 +295,9 @@ impl Tui {
             }
             UiMode::ConfirmClose => {
                 Self::render_confirm_close_panel(f, state);
+            }
+            UiMode::ConfirmDelete => {
+                Self::render_confirm_delete_panel(f, state);
             }
             UiMode::Normal => {}
         }
@@ -365,11 +395,11 @@ impl Tui {
                 };
                 let (status_dot, status_color) = match &slot.strategy.state {
                     DcaState::Running           => ("●", Color::Green),
-                    DcaState::TakeProfitReached => ("✓", Color::Cyan),
-                    DcaState::StopLossReached   => ("✗", Color::Red),
-                    DcaState::MaxOrdersReached  => ("■", Color::Yellow),
-                    DcaState::Error(_)          => ("!", Color::Red),
-                    DcaState::Idle              => ("○", Color::DarkGray),
+                    DcaState::TakeProfitReached => ("●", Color::Cyan),
+                    DcaState::StopLossReached   => ("●", Color::Magenta),
+                    DcaState::MaxOrdersReached  => ("●", Color::Yellow),
+                    DcaState::Error(_)          => ("●", Color::LightRed),
+                    DcaState::Idle              => ("●", Color::Red),
                 };
                 let dir_color = match slot.strategy.config.direction {
                     TradeDirection::Long  => Color::Green,
@@ -381,11 +411,14 @@ impl Tui {
                     Style::default().fg(Color::Gray)
                 };
 
+                let flip_icon = if slot.strategy.config.auto_flip { "↺" } else { " " };
+
                 Line::from(vec![
                     Span::styled(format!("{} ", prefix), sel_style),
                     Span::styled(base.to_string(), sel_style),
                     Span::raw(" "),
                     Span::styled(dir_arrow.to_string(), Style::default().fg(dir_color)),
+                    Span::styled(flip_icon.to_string(), Style::default().fg(Color::Magenta)),
                     Span::raw(" "),
                     Span::styled(status_dot.to_string(), Style::default().fg(status_color)),
                 ])
@@ -422,25 +455,29 @@ impl Tui {
             .constraints([Constraint::Percentage(42), Constraint::Percentage(58)])
             .split(area);
 
+        let (base, quote, base_bal, quote_bal) = state
+            .selected()
+            .map(|s| {
+                (
+                    s.base_asset.clone(),
+                    s.quote_asset.clone(),
+                    s.base_balance,
+                    s.quote_balance,
+                )
+            })
+            .unwrap_or_default();
+
         // Panel izquierdo: Precio y Balances
         {
             let market = state.selected_market();
-            let (base, quote, base_bal, quote_bal) = state
-                .selected()
-                .map(|s| {
-                    (
-                        s.base_asset.clone(),
-                        s.quote_asset.clone(),
-                        s.base_balance,
-                        s.quote_balance,
-                    )
-                })
-                .unwrap_or_default();
 
             let change_color = if market.change_24h_pct >= 0.0 { Color::Green } else { Color::Red };
             let change_sign  = if market.change_24h_pct >= 0.0 { "+" } else { "" };
 
             let mut price_text = vec![
+                Line::from(vec![
+                    Span::styled("── MARKETS ──────────────────", Style::default().fg(Color::DarkGray)),
+                ]),
                 Line::from(vec![
                     Span::styled(
                         format!(" ${:.2}", market.price),
@@ -459,7 +496,9 @@ impl Tui {
                     Span::styled(format!("${:.2}", market.low_24h), Style::default().fg(Color::Red)),
                 ]),
                 Line::from(""),
-                Line::from(Span::styled(" Balance ", Style::default().fg(Color::DarkGray))),
+                Line::from(vec![
+                    Span::styled("── BALANCE ──────────────────", Style::default().fg(Color::DarkGray)),
+                ]),
                 Line::from(vec![
                     Span::styled(format!(" {}: ", base), Style::default().fg(Color::Yellow)),
                     Span::styled(format!("{:.6}", base_bal), Style::default().fg(Color::White)),
@@ -470,21 +509,21 @@ impl Tui {
                 ]),
             ];
 
-            // Niveles S/R (disponibles después del primer ciclo del alert engine)
+            // Niveles de Soporte/Resistencia
             if let Some(sym) = state.selected().map(|s| s.symbol.clone()) {
                 if let Some(level) = state.alert_levels.get(&sym) {
                     if level.resistance > 0.0 {
+                        price_text.push(Line::from(""));
                         price_text.push(Line::from(vec![
-                            Span::styled(" S:", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                format!("${:.0}", level.support),
-                                Style::default().fg(Color::Green),
-                            ),
-                            Span::styled("  R:", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                format!("${:.0}", level.resistance),
-                                Style::default().fg(Color::Red),
-                            ),
+                            Span::styled("── TECH LEVELS ──────────────", Style::default().fg(Color::DarkGray)),
+                        ]));
+                        price_text.push(Line::from(vec![
+                            Span::styled(" Support:    ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(format!("${:.2}", level.support), Style::default().fg(Color::Green)),
+                        ]));
+                        price_text.push(Line::from(vec![
+                            Span::styled(" Resistance: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(format!("${:.2}", level.resistance), Style::default().fg(Color::Red)),
                         ]));
                     }
                 }
@@ -602,6 +641,39 @@ impl Tui {
 
             let dca_text = vec![
                 Line::from(vec![
+                    Span::styled("── STATE ───────────────────", Style::default().fg(Color::DarkGray)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Mode:       ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        if slot.strategy.config.auto_restart { "Auto-Restart ✓ " } else { "Manual " },
+                        Style::default().fg(if slot.strategy.config.auto_restart { Color::Cyan } else { Color::DarkGray })
+                    ),
+                    Span::styled(
+                        if slot.strategy.config.auto_flip { "↺ L↔S" } else { "" },
+                        Style::default().fg(Color::Magenta)
+                    ),
+                ]),
+                Line::from(vec![
+                    Span::styled(" Status:     ", Style::default().fg(Color::DarkGray)),
+                    Span::styled("● ", Style::default().fg(match &slot.strategy.state {
+                        DcaState::Running => Color::Green,
+                        DcaState::Idle => Color::Red,
+                        DcaState::TakeProfitReached => Color::Cyan,
+                        DcaState::StopLossReached => Color::Magenta,
+                        DcaState::MaxOrdersReached => Color::Yellow,
+                        DcaState::Error(_) => Color::LightRed,
+                    })),
+                    Span::styled(
+                        slot.strategy.state.label().to_string(),
+                        Style::default().fg(Color::White).add_modifier(Modifier::BOLD)
+                    ),
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("── POSITION ────────────────", Style::default().fg(Color::DarkGray)),
+                ]),
+                Line::from(vec![
                     Span::styled(avg_label, Style::default().fg(Color::DarkGray)),
                     Span::styled(format!("${:.4}", avg), Style::default().fg(Color::White)),
                 ]),
@@ -620,14 +692,6 @@ impl Tui {
                     ),
                 ]),
                 Line::from(vec![
-                    Span::styled(" P&L:        ", Style::default().fg(Color::DarkGray)),
-                    Span::styled(
-                        format!("{}{:.2} $ ({}{:.2}%)", pnl_sign, pnl, pnl_sign, pnl_pct),
-                        Style::default().fg(pnl_color).add_modifier(Modifier::BOLD),
-                    ),
-                ]),
-                trailing_line,
-                Line::from(vec![
                     Span::styled(" Orders:     ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         format!("{} / {}", orders_count, max_orders),
@@ -640,7 +704,59 @@ impl Tui {
                         format!(" ${:.2}  Today: ${:.2}", quote_amount, daily_spent),
                         Style::default().fg(Color::Yellow),
                     ),
+                    Span::styled("  Next: ", Style::default().fg(Color::DarkGray)),
+                    {
+                        let can_buy = match direction {
+                            TradeDirection::Long => quote_bal >= quote_amount,
+                            TradeDirection::Short => {
+                                let needed_qty = if price > 0.0 { quote_amount / price } else { 0.0 };
+                                base_bal >= needed_qty
+                            }
+                        };
+                        if can_buy {
+                            Span::styled("✓ OK", Style::default().fg(Color::Green))
+                        } else {
+                            Span::styled("⚠ LOW", Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD))
+                        }
+                    }
                 ]),
+                Line::from(vec![
+                    Span::styled(" Liq. Safety: ", Style::default().fg(Color::DarkGray)),
+                    {
+                        let warning = match direction {
+                            TradeDirection::Long => {
+                                if qty > 0.0 && base_bal < (qty * 0.9995) {
+                                    Some(format!("Need {:.6} more {}", qty - base_bal, base_asset))
+                                } else { None }
+                            }
+                            TradeDirection::Short => {
+                                let cost = qty * price;
+                                if qty > 0.0 && quote_bal < cost {
+                                    Some(format!("Need ${:.2} more {}", cost - quote_bal, quote_asset))
+                                } else { None }
+                            }
+                        };
+                        if let Some(msg) = warning {
+                            Span::styled(format!("⚠ INSUFFICIENT ({})", msg), Style::default().fg(Color::LightRed).add_modifier(Modifier::BOLD))
+                        } else if qty > 0.0 {
+                            Span::styled("✓ READY TO CLOSE", Style::default().fg(Color::Green))
+                        } else {
+                            Span::styled("-", Style::default().fg(Color::DarkGray))
+                        }
+                    }
+                ]),
+                Line::from(""),
+                Line::from(vec![
+                    Span::styled("── PERFORMANCE ─────────────", Style::default().fg(Color::DarkGray)),
+                ]),
+                Line::from(vec![
+                    Span::styled(" P&L:        ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(
+                        format!("{}{:.2} $ ({}{:.2}%)", pnl_sign, pnl, pnl_sign, pnl_pct),
+                        Style::default().fg(pnl_color).add_modifier(Modifier::BOLD),
+                    ),
+                ]),
+                trailing_line,
             ];
 
             f.render_widget(
@@ -839,14 +955,25 @@ impl Tui {
                 Span::styled("[Esc / N]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
                 Span::raw(" Cancel"),
             ],
+            UiMode::ConfirmDelete => vec![
+                Span::raw(" "),
+                Span::styled("[Enter / Y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::raw(" Confirm delete slot  "),
+                Span::styled("[Esc / N]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" Cancel"),
+            ],
             UiMode::Normal => vec![
                 Span::raw(" "),
                 Span::styled("[S]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
                 Span::raw(" New  "),
                 Span::styled("[X]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" Pause  "),
+                Span::raw(if state.selected_slot_is_active() { " Pause  " } else { " Start  " }),
                 Span::styled("[V]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
                 Span::raw(" Sell now  "),
+                Span::styled("[F]", Style::default().fg(Color::Magenta).add_modifier(Modifier::BOLD)),
+                Span::raw(" Flip  "),
+                Span::styled("[D]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+                Span::raw(" Delete  "),
                 Span::styled("[C]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" Config  "),
                 Span::styled("[↑↓]", Style::default().fg(Color::Cyan)),
@@ -875,7 +1002,7 @@ impl Tui {
 
     fn render_restore_session_panel(
         f: &mut Frame,
-        slots_info: &[(String, TradeDirection, usize)],
+        slots_info: &[(String, TradeDirection, usize, bool)],
     ) {
         let size = f.area();
         let slot_count = slots_info.len().max(1);
@@ -915,12 +1042,13 @@ impl Tui {
             Line::from(""),
         ];
 
-        for (sym, dir, count) in slots_info {
+        for (sym, dir, count, active) in slots_info {
             let (dir_label, dir_color) = match dir {
                 TradeDirection::Long  => ("▲ LONG",  Color::Green),
                 TradeDirection::Short => ("▼ SHORT", Color::Red),
             };
             let trade_label = if *count == 1 { "buy" } else { "buys" };
+            let status = if *active { "  ACTIVE" } else { "" };
             lines.push(Line::from(vec![
                 Span::styled("  ● ", Style::default().fg(Color::Cyan)),
                 Span::styled(
@@ -933,6 +1061,7 @@ impl Tui {
                     format!("  {} {}", count, trade_label),
                     Style::default().fg(Color::White),
                 ),
+                Span::styled(status, Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
             ]));
         }
 
@@ -1024,6 +1153,27 @@ impl Tui {
             Style::default().fg(Color::DarkGray)
         };
 
+        let flip_off_style = if !state.new_strat_auto_flip {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let flip_on_style = if state.new_strat_auto_flip {
+            Style::default().fg(Color::Black).bg(Color::Magenta).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let bnb_off_style = if !state.new_strat_has_bnb {
+            Style::default().fg(Color::Black).bg(Color::DarkGray).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let bnb_on_style = if state.new_strat_has_bnb {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+
         // Lista de símbolos con scroll (visible = 5 a la vez)
         let visible = 5usize;
         let sel = state.new_strat_symbol_idx.min(state.symbols.len().saturating_sub(1));
@@ -1067,10 +1217,25 @@ impl Tui {
             Span::raw("  "),
             Span::styled(" Auto ", auto_style),
         ]));
+        lines.push(Line::from(vec![
+            Span::styled(" Dir Flip (F):     ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" Off ", flip_off_style),
+            Span::raw("  "),
+            Span::styled(" ▲↔▼ Invert Dir ↺ ", flip_on_style),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled("   ↳ Flips Long↔Short direction after each TP", Style::default().fg(Color::DarkGray)),
+        ]));
+        lines.push(Line::from(vec![
+            Span::styled(" Pay Fees w/ BNB(B):", Style::default().fg(Color::DarkGray)),
+            Span::styled(" No ", bnb_off_style),
+            Span::raw("      "),
+            Span::styled(" Yes (25% Disc) ", bnb_on_style),
+        ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled("  [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled("Start    ", Style::default().fg(Color::White)),
+            Span::styled(" [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
+            Span::styled("Create and Start Strategy", Style::default().fg(Color::White)),
             Span::styled("[Esc] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             Span::styled("Cancel", Style::default().fg(Color::DarkGray)),
         ]));
@@ -1084,8 +1249,8 @@ impl Tui {
 
     fn render_config_panel(f: &mut Frame, state: &AppState) {
         let size = f.area();
-        let popup_w = 44u16.min(size.width.saturating_sub(4));
-        let popup_h = 10u16.min(size.height.saturating_sub(4));
+        let popup_w = 46u16.min(size.width.saturating_sub(4));
+        let popup_h = 13u16.min(size.height.saturating_sub(4));
         let popup_x = (size.width.saturating_sub(popup_w)) / 2;
         let popup_y = (size.height.saturating_sub(popup_h)) / 2;
         let area = Rect { x: popup_x, y: popup_y, width: popup_w, height: popup_h };
@@ -1093,7 +1258,7 @@ impl Tui {
         f.render_widget(Clear, area);
         f.render_widget(
             Block::default()
-                .title(" ⚙ USDT Amount ")
+                .title(" ⚙ Global Config ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(
@@ -1116,39 +1281,50 @@ impl Tui {
             .map(|s| s.strategy.config.quote_amount)
             .unwrap_or(0.0);
         let buf = &state.cfg_amount_buf;
+        let has_bnb = state.cfg_has_bnb;
+
+        let bnb_on_style = if has_bnb {
+            Style::default().fg(Color::Black).bg(Color::Yellow).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        let bnb_off_style = if !has_bnb {
+            Style::default().fg(Color::Black).bg(Color::Gray).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
 
         let lines = vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled(" Current: ", Style::default().fg(Color::DarkGray)),
-                Span::styled(
-                    format!("${:.2} USDT", current),
-                    Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
-                ),
-            ]),
-            Line::from(""),
-            Line::from(vec![
-                Span::styled(" New:     ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" USDT Amount: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{}▌", if buf.is_empty() { "_" } else { buf }),
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled(" USDT", Style::default().fg(Color::DarkGray)),
+                Span::styled(format!(" (Current: ${:.1})", current), Style::default().fg(Color::DarkGray)),
+            ]),
+            Line::from(""),
+            Line::from(vec![
+                Span::styled(" Pay Fees w/ BNB (B): ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" No ", bnb_off_style),
+                Span::raw(" "),
+                Span::styled(" Yes (25% Disc) ", bnb_on_style),
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                " (applies to all slots)",
-                Style::default().fg(Color::DarkGray),
+                " (these settings apply to ALL active slots)",
+                Style::default().fg(Color::DarkGray).add_modifier(Modifier::ITALIC),
             )),
             Line::from(""),
             Line::from(vec![
                 Span::styled(
-                    "  [Enter] ",
+                    " [Enter] ",
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Confirm    ", Style::default().fg(Color::White)),
+                Span::styled("Save All    ", Style::default().fg(Color::White)),
                 Span::styled(
-                    "[Esc] ",
+                    " [Esc] ",
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled("Cancel", Style::default().fg(Color::DarkGray)),
@@ -1252,6 +1428,81 @@ impl Tui {
                 Span::styled("Cancel", Style::default().fg(Color::DarkGray)),
             ]),
         ];
+
+        f.render_widget(Paragraph::new(lines), inner);
+    }
+
+    fn render_confirm_delete_panel(f: &mut Frame, state: &AppState) {
+        let size = f.area();
+        let has_position = state.selected().map(|sl| sl.strategy.total_quantity() > 0.0).unwrap_or(false);
+        
+        // Ajustar altura si hay advertencia de posición
+        let popup_h = if has_position { 12u16 } else { 10u16 }.min(size.height.saturating_sub(4));
+        let popup_w = 55u16.min(size.width.saturating_sub(4));
+        let popup_x = (size.width.saturating_sub(popup_w)) / 2;
+        let popup_y = (size.height.saturating_sub(popup_h)) / 2;
+        let area = Rect { x: popup_x, y: popup_y, width: popup_w, height: popup_h };
+
+        f.render_widget(Clear, area);
+        f.render_widget(
+            Block::default()
+                .title(" 🗑 Borrar Slot ")
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            area,
+        );
+
+        let inner = Rect {
+            x: area.x + 2,
+            y: area.y + 1,
+            width: area.width.saturating_sub(4),
+            height: area.height.saturating_sub(2),
+        };
+
+        let symbol = state.selected().map(|sl| sl.symbol.clone()).unwrap_or_default();
+
+        let mut lines = vec![
+            Line::from(""),
+            Line::from(vec![
+                Span::styled("  ¿Confirmas borrar el slot de ", Style::default().fg(Color::White)),
+                Span::styled(
+                    symbol,
+                    Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+                ),
+                Span::raw("?"),
+            ]),
+        ];
+
+        if has_position {
+            lines.push(Line::from(""));
+            lines.push(Line::from(vec![
+                Span::styled("  ⚠ POSICIÓN ABIERTA DETECTADA", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
+            ]));
+            lines.push(Line::from(vec![
+                Span::styled("  Si borras, el bot dejará de gestionarla.", Style::default().fg(Color::Red)),
+            ]));
+        } else {
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                "  Se perderá el historial local de este ciclo.",
+                Style::default().fg(Color::DarkGray),
+            )));
+        }
+
+        lines.push(Line::from(""));
+        lines.push(Line::from(vec![
+            Span::styled(
+                "  [Enter / Y] ",
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Borrar ahora   ", Style::default().fg(Color::White)),
+            Span::styled(
+                "[Esc / N] ",
+                Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
+            ),
+            Span::styled("Cancelar", Style::default().fg(Color::DarkGray)),
+        ]));
 
         f.render_widget(Paragraph::new(lines), inner);
     }

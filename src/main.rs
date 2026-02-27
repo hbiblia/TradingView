@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
     // Crear los slots iniciales
     let mut slots: Vec<StrategySlot> = Vec::new();
     let mut next_id = 0usize;
-    let mut restore_info: Vec<(String, Direction, usize)> = Vec::new();
+    let mut restore_info: Vec<(String, Direction, usize, bool)> = Vec::new();
 
     if !snapshots.is_empty() {
         // Restaurar desde snapshots previos
@@ -93,7 +93,7 @@ async fn main() -> Result<()> {
             let trade_count = snap.trades.len();
             strat.restore_from_snapshot(snap.clone());
 
-            restore_info.push((snap.symbol.clone(), snap.direction.clone(), trade_count));
+            restore_info.push((snap.symbol.clone(), snap.direction.clone(), trade_count, strat.state.is_active()));
 
             slots.push(StrategySlot {
                 id: next_id,
@@ -125,7 +125,7 @@ async fn main() -> Result<()> {
     // Símbolos activos para WebSocket
     let initial_symbols: Vec<String> = slots.iter().map(|s| s.symbol.clone()).collect();
 
-    let ui_mode = if restore_info.iter().any(|(_, _, c)| *c > 0) {
+    let ui_mode = if restore_info.iter().any(|(_, _, c, active)| *c > 0 || *active) {
         UiMode::RestoreSession(restore_info)
     } else {
         UiMode::Normal
@@ -143,7 +143,10 @@ async fn main() -> Result<()> {
         new_strat_symbol_idx: 0,
         new_strat_direction: Direction::Long,
         new_strat_auto_restart: config.dca.auto_restart,
+        new_strat_auto_flip: config.dca.auto_flip,
+        new_strat_has_bnb: config.dca.has_bnb_balance,
         cfg_amount_buf: String::new(),
+        cfg_has_bnb: config.dca.has_bnb_balance,
         next_slot_id: next_id,
     }));
 
@@ -283,10 +286,9 @@ async fn handle_command(
             state.lock().await.should_quit = true;
         }
 
-        // --- Restauración de sesión ---
         AppCommand::RestoreSessionContinue => {
             let mut s = state.lock().await;
-            s.log("Previous sessions restored. Activate them manually with [S].");
+            s.log("Previous sessions restored. Active strategies have been RESUMED.");
             s.ui_mode = UiMode::Normal;
         }
         AppCommand::RestoreSessionDiscard => {
@@ -329,13 +331,67 @@ async fn handle_command(
             }
         }
 
-        // --- Detener slot seleccionado ---
-        AppCommand::StopSelected => {
+        AppCommand::ToggleStartStopSelected => {
             let mut s = state.lock().await;
+            let mut log_msg = None;
             if let Some(slot) = s.selected_mut() {
-                slot.strategy.stop();
+                if slot.strategy.state.is_active() {
+                    slot.strategy.stop();
+                    log_msg = Some(format!("Strategy for {} STOPPED.", slot.symbol));
+                } else {
+                    slot.strategy.start();
+                    log_msg = Some(format!("Strategy for {} STARTED.", slot.symbol));
+                }
             }
-            s.log("Strategy stopped.");
+            if let Some(msg) = log_msg {
+                s.log(&msg);
+                drop(s);
+                save_all_snapshots(state, state_path).await;
+            }
+        }
+
+        AppCommand::ToggleAutoFlip => {
+            let mut s = state.lock().await;
+            let mut log_msg = None;
+            if let Some(slot) = s.selected_mut() {
+                slot.strategy.config.auto_flip = !slot.strategy.config.auto_flip;
+                let status = if slot.strategy.config.auto_flip { "ENABLED" } else { "DISABLED" };
+                log_msg = Some(format!("Auto-Flip {} for {}", status, slot.symbol));
+            }
+            if let Some(msg) = log_msg {
+                s.log(&msg);
+                drop(s);
+                save_all_snapshots(state, state_path).await;
+            }
+        }
+
+        // --- Borrado de slot (D) ---
+        AppCommand::OpenConfirmDelete => {
+            let mut s = state.lock().await;
+            if s.slots.len() <= 1 {
+                s.log_error("Cannot delete the last slot.");
+                return;
+            }
+
+            s.ui_mode = UiMode::ConfirmDelete;
+        }
+        AppCommand::ConfirmDeleteNow => {
+            let id = {
+                let mut s = state.lock().await;
+                s.ui_mode = UiMode::Normal;
+                s.selected().map(|sl| sl.id)
+            };
+
+            if let Some(id) = id {
+                let mut s = state.lock().await;
+                s.remove_slot(id);
+                s.log("Slot removed.");
+                drop(s);
+                
+                update_symbol_watch(state, symbol_tx).await;
+                save_all_snapshots(state, state_path).await;
+                refresh_balance(state, client).await;
+            }
         }
 
         // --- Modal nueva estrategia (S) ---
@@ -350,6 +406,7 @@ async fn handle_command(
             s.new_strat_symbol_idx = idx;
             s.new_strat_direction = Direction::Long;
             s.new_strat_auto_restart = base_config.auto_restart;
+            s.new_strat_auto_flip = base_config.auto_flip;
             s.ui_mode = UiMode::NewStrategy;
         }
         AppCommand::NewStratSymbolUp => {
@@ -378,18 +435,28 @@ async fn handle_command(
             let mut s = state.lock().await;
             s.new_strat_auto_restart = !s.new_strat_auto_restart;
         }
+        AppCommand::NewStratToggleAutoFlip => {
+            let mut s = state.lock().await;
+            s.new_strat_auto_flip = !s.new_strat_auto_flip;
+        }
+        AppCommand::NewStratToggleBnb => {
+            let mut s = state.lock().await;
+            s.new_strat_has_bnb = !s.new_strat_has_bnb;
+        }
         AppCommand::NewStratCancel => {
             state.lock().await.ui_mode = UiMode::Normal;
         }
         AppCommand::NewStratConfirm => {
-            let (symbol, direction, auto_restart, can_add) = {
+            let (symbol, direction, auto_restart, auto_flip, has_bnb, can_add) = {
                 let s = state.lock().await;
                 let idx = s.new_strat_symbol_idx.min(s.symbols.len().saturating_sub(1));
                 let sym = s.symbols.get(idx).cloned().unwrap_or_else(|| "BTCUSDT".to_string());
                 let dir = s.new_strat_direction.clone();
                 let ar = s.new_strat_auto_restart;
+                let af = s.new_strat_auto_flip;
+                let bnb = s.new_strat_has_bnb;
                 let can = s.slots.len() < MAX_SLOTS;
-                (sym, dir, ar, can)
+                (sym, dir, ar, af, bnb, can)
             };
 
             if !can_add {
@@ -402,6 +469,8 @@ async fn handle_command(
             cfg.symbol = symbol.clone();
             cfg.direction = direction.clone();
             cfg.auto_restart = auto_restart;
+            cfg.auto_flip = auto_flip;
+            cfg.has_bnb_balance = has_bnb;
             let mut strat = DcaStrategy::new(cfg);
             strat.start();
 
@@ -439,6 +508,8 @@ async fn handle_command(
             }
             s.ui_mode = UiMode::Normal;
             s.log("DCA cycle restarted.");
+            drop(s);
+            save_all_snapshots(state, state_path).await;
         }
         AppCommand::PostSaleDismiss(slot_id) => {
             let mut s = state.lock().await;
@@ -452,11 +523,12 @@ async fn handle_command(
         // --- Panel de configuración (solo monto) ---
         AppCommand::OpenConfig => {
             let mut s = state.lock().await;
-            let amt = s
+            let (amt, bnb) = s
                 .selected()
-                .map(|sl| sl.strategy.config.quote_amount)
-                .unwrap_or(base_config.quote_amount);
+                .map(|sl| (sl.strategy.config.quote_amount, sl.strategy.config.has_bnb_balance))
+                .unwrap_or((base_config.quote_amount, base_config.has_bnb_balance));
             s.cfg_amount_buf = format!("{}", amt);
+            s.cfg_has_bnb = bnb;
             s.ui_mode = UiMode::Config;
         }
         AppCommand::CloseConfig => {
@@ -568,12 +640,14 @@ async fn handle_command(
                 Some(v) if v >= 1.0 => {
                     {
                         let mut s = state.lock().await;
+                        let bnb = s.cfg_has_bnb;
                         // Aplicar a todos los slots
                         for slot in s.slots.iter_mut() {
                             slot.strategy.config.quote_amount = v;
+                            slot.strategy.config.has_bnb_balance = bnb;
                         }
                         s.ui_mode = UiMode::Normal;
-                        s.log(&format!("Amount per trade: ${:.2} USDT (all slots)", v));
+                        s.log(&format!("Config updated: ${:.2} USDT, BNB Fees: {} (all slots)", v, if bnb { "YES" } else { "NO" }));
                     }
                     if let Err(e) = Config::save_dca(config_path, &base_config.symbol, v) {
                         state.lock().await.log_error(&format!(
@@ -590,6 +664,11 @@ async fn handle_command(
                 }
             }
         }
+
+        AppCommand::CfgToggleBnb => {
+            let mut s = state.lock().await;
+            s.cfg_has_bnb = !s.cfg_has_bnb;
+        }
     }
 }
 
@@ -602,7 +681,7 @@ async fn evaluate_slot(
     state_path: &std::path::Path,
 ) {
     let (price, direction, should_entry, should_tp, should_sl, should_trailing_tp,
-         qty, amount, pnl, pnl_pct, auto_restart, symbol, price_peak, price_trough) =
+         qty, amount, pnl, pnl_pct, auto_restart, auto_flip, symbol, price_peak, price_trough) =
     {
         let mut s = state.lock().await;
         let now = chrono::Utc::now();
@@ -645,12 +724,13 @@ async fn evaluate_slot(
         let pnl            = slot.strategy.pnl(price);
         let pnl_pct        = slot.strategy.pnl_pct(price);
         let auto_restart   = slot.strategy.config.auto_restart;
+        let auto_flip      = slot.strategy.config.auto_flip;
         let symbol         = slot.symbol.clone();
         let price_peak     = slot.strategy.price_peak;
         let price_trough   = slot.strategy.price_trough;
 
         (price, direction, should_entry, should_tp, should_sl, should_trailing_tp,
-         qty, amount, pnl, pnl_pct, auto_restart, symbol, price_peak, price_trough)
+         qty, amount, pnl, pnl_pct, auto_restart, auto_flip, symbol, price_peak, price_trough)
     };
 
     // =====================================================================
@@ -715,14 +795,27 @@ async fn evaluate_slot(
                 let received: f64 = order.cummulative_quote_qty.parse().unwrap_or(0.0);
                 {
                     let mut s = state.lock().await;
+                    let mut flipped_to = None;
                     if let Some(slot) = s.slot_by_id_mut(slot_id) {
                         slot.strategy.state = DcaState::TakeProfitReached;
                         slot.strategy.clear_trades();
                         if auto_restart {
+                            if auto_flip {
+                                slot.strategy.config.direction = slot.strategy.config.direction.flip();
+                                flipped_to = Some(slot.strategy.config.direction.clone());
+                            }
                             slot.strategy.start();
                         } else {
                             slot.strategy.stop();
                         }
+                    }
+
+                    if let Some(dir) = flipped_to {
+                        let dir_label = match dir {
+                            Direction::Long => "LONG",
+                            Direction::Short => "SHORT",
+                        };
+                        s.log(&format!("Auto-flip enabled. Switched to {} mode.", dir_label));
                     }
                     s.log(&format!("✓ TAKE PROFIT [{}] executed. Received: ${:.2}", symbol, received));
                     if auto_restart {
@@ -777,14 +870,27 @@ async fn evaluate_slot(
                 let received: f64 = order.cummulative_quote_qty.parse().unwrap_or(0.0);
                 {
                     let mut s = state.lock().await;
+                    let mut flipped_to = None;
                     if let Some(slot) = s.slot_by_id_mut(slot_id) {
                         slot.strategy.state = DcaState::TakeProfitReached;
                         slot.strategy.clear_trades();
                         if auto_restart {
+                            if auto_flip {
+                                slot.strategy.config.direction = slot.strategy.config.direction.flip();
+                                flipped_to = Some(slot.strategy.config.direction.clone());
+                            }
                             slot.strategy.start();
                         } else {
                             slot.strategy.stop();
                         }
+                    }
+
+                    if let Some(dir) = flipped_to {
+                        let dir_label = match dir {
+                            Direction::Long => "LONG",
+                            Direction::Short => "SHORT",
+                        };
+                        s.log(&format!("Auto-flip enabled. Switched to {} mode.", dir_label));
                     }
                     s.log(&format!("✓ TRAILING TP [{}] executed. Received: ${:.2}", symbol, received));
                     if auto_restart {
@@ -846,7 +952,24 @@ async fn evaluate_slot(
                         save_all_snapshots(state, state_path).await;
                     }
                     Err(e) => {
-                        state.lock().await.log_error(&format!("Buy [{}] failed: {}", symbol, e));
+                        let mut s = state.lock().await;
+                        let mut err_msg = format!("Buy [{}] failed: {}", symbol, e);
+                        
+                        if err_msg.contains("-2010") {
+                            if let Some(slot) = s.slot_by_id(slot_id) {
+                                let needed = amount - slot.quote_balance;
+                                if needed > 0.0 {
+                                    err_msg = format!("Buy [{}] failed: Insufficient balance. You need ${:.2} more {}.", symbol, needed, slot.quote_asset);
+                                }
+                            }
+                        }
+                        
+                        s.log_error(&err_msg);
+                        if let Some(slot) = s.slot_by_id_mut(slot_id) {
+                            slot.strategy.stop();
+                            slot.strategy.state = DcaState::Idle;
+                        }
+                        s.log(&format!("Strategy for {} STOPPED due to error.", symbol));
                     }
                 }
             }
@@ -884,10 +1007,24 @@ async fn evaluate_slot(
                         save_all_snapshots(state, state_path).await;
                     }
                     Err(e) => {
-                        state.lock().await.log_error(&format!(
-                            "SHORT Sell [{}] failed: {}",
-                            symbol, e
-                        ));
+                        let mut s = state.lock().await;
+                        let mut err_msg = format!("Short entry [{}] failed: {}", symbol, e);
+                        
+                        if err_msg.contains("-2010") {
+                            if let Some(slot) = s.slot_by_id(slot_id) {
+                                let needed = qty_to_sell - slot.base_balance;
+                                if needed > 0.0 {
+                                    err_msg = format!("Short entry [{}] failed: Insufficient balance. You need {:.6} more {}.", symbol, needed, slot.base_asset);
+                                }
+                            }
+                        }
+                        
+                        s.log_error(&err_msg);
+                        if let Some(slot) = s.slot_by_id_mut(slot_id) {
+                            slot.strategy.stop();
+                            slot.strategy.state = DcaState::Idle;
+                        }
+                        s.log(&format!("Strategy for {} STOPPED due to error.", symbol));
                     }
                 }
             }

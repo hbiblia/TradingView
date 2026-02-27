@@ -1,0 +1,53 @@
+[package]
+name = "tradingbot"
+version = "0.1.0"
+edition = "2021"
+authors = ["TradingBot DCA"]
+description = "Automated DCA trading bot for Binance Spot"
+
+[dependencies]
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# HTTP client (rustls - no native deps needed)
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+
+# WebSocket
+tokio-tungstenite = { version = "0.23", features = ["rustls-tls-native-roots"] }
+futures-util = "0.3"
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Cryptography (HMAC-SHA256 for Binance API signing)
+hmac = "0.12"
+sha2 = "0.10"
+hex = "0.4"
+
+# Config / Time
+toml = "0.8"
+toml_edit = "0.22"
+chrono = { version = "0.4", features = ["serde"] }
+url = "2"
+
+# TUI
+ratatui = "0.28"
+crossterm = { version = "0.27", features = ["event-stream"] }
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+anyhow = "1"
+
+[build-dependencies]
+# Embeber ícono en el .exe de Windows
+winres = "0.1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1

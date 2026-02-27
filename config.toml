@@ -1,0 +1,59 @@
+# =============================================================
+# BINANCE DCA BOT - CONFIGURACION
+# =============================================================
+# IMPORTANTE: Nunca compartas este archivo. Guarda tus claves
+#             de API en un lugar seguro.
+
+[binance]
+# Tus claves de API de Binance
+# Ve a: https://www.binance.com/es/my/settings/api-management
+api_key    = ""
+api_secret = ""
+
+# true = usar Testnet (para pruebas sin dinero real)
+# false = usar Binance real
+testnet = false
+
+# ----------------------------------------------------------------
+[dca]
+# Par de trading (símbolo de Binance)
+symbol = "BTCUSDT"
+
+# Cantidad en moneda de cotización (USDT) por cada compra
+quote_amount = 10.0
+
+# Intervalo entre compras (en minutos)
+# Ejemplo: 60 = compra cada 1 hora
+interval_minutes = 60
+
+# Compra adicional cuando el precio cae X% desde la última compra
+# Ejemplo: 2.0 = compra si cae 2% adicional al timer
+# 0.0 = desactivado (solo timer)
+price_drop_trigger = 2.0
+
+# Número máximo de órdenes DCA antes de pausar
+max_orders = 10
+
+# Tomar ganancias cuando el precio suba X% sobre el costo promedio
+# 0.0 = desactivado
+take_profit_pct = 5.0
+
+# Stop loss cuando el precio baje X% sobre el costo promedio
+# 0.0 = desactivado
+stop_loss_pct = 15.0
+
+# Trailing Take Profit: vende cuando el precio cae X% desde su máximo,
+# pero solo si todavía hay ganancia sobre el costo promedio
+# Ejemplo: 1.5 = vende si el precio cae 1.5% desde el pico y sigue en profit
+# 0.0 = desactivado
+trailing_tp_pct = 1.5
+
+# Reiniciar el ciclo DCA automáticamente después de un Take Profit o Trailing TP
+# true  = reinicia solo (compra de nuevo en el siguiente tick)
+# false = muestra una pantalla y espera que vos decidas
+auto_restart = false
+
+# ----------------------------------------------------------------
+[risk]
+# Gasto máximo en USDT por día (protección de capital)
+max_daily_spend = 100.0

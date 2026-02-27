@@ -4,31 +4,31 @@ use serde::{Deserialize, Serialize};
 use crate::config::{DcaConfig, Direction};
 use crate::models::order::DcaTrade;
 
-/// Estado de la estrategia DCA
+/// DCA strategy state
 #[derive(Debug, Clone, PartialEq)]
 pub enum DcaState {
-    /// Detenida / esperando inicio manual
+    /// Stopped / waiting for manual start
     Idle,
-    /// Ejecutándose, esperando condición de entrada
+    /// Running, waiting for entry condition
     Running,
-    /// Take profit alcanzado (posición cerrada)
+    /// Take profit reached (position closed)
     TakeProfitReached,
-    /// Stop loss activado (posición cerrada)
+    /// Stop loss activated (position closed)
     StopLossReached,
-    /// Número máximo de órdenes alcanzado
+    /// Maximum number of orders reached
     MaxOrdersReached,
-    /// Error durante la ejecución
+    /// Error during execution
     Error(String),
 }
 
 impl DcaState {
     pub fn label(&self) -> &str {
         match self {
-            DcaState::Idle => "DETENIDO",
-            DcaState::Running => "ACTIVO",
+            DcaState::Idle => "STOPPED",
+            DcaState::Running => "ACTIVE",
             DcaState::TakeProfitReached => "TAKE PROFIT",
             DcaState::StopLossReached => "STOP LOSS",
-            DcaState::MaxOrdersReached => "MAX ÓRDENES",
+            DcaState::MaxOrdersReached => "MAX ORDERS",
             DcaState::Error(_) => "ERROR",
         }
     }
@@ -38,22 +38,22 @@ impl DcaState {
     }
 }
 
-/// Motor de la estrategia DCA
+/// DCA strategy engine
 pub struct DcaStrategy {
     pub config: DcaConfig,
     pub state: DcaState,
     pub trades: Vec<DcaTrade>,
     pub last_buy_time: Option<DateTime<Utc>>,
     pub last_buy_price: Option<f64>,
-    /// Gasto total en el día actual (LONG: USDT comprado; SHORT: USDT de base vendido)
+    /// Total spent on the current day (LONG: USDT bought; SHORT: base asset USDT sold)
     pub daily_spent: f64,
-    /// Día del mes del último reset
+    /// Day of the month of the last reset
     last_reset_day: u32,
-    /// Tiempo hasta la próxima entrada (segundos)
+    /// Time until next entry (seconds)
     pub next_buy_in_secs: i64,
-    /// LONG: precio máximo visto con posición abierta (para trailing TP)
+    /// LONG: maximum price seen while position is open (for trailing TP)
     pub price_peak: f64,
-    /// SHORT: precio mínimo visto con posición abierta (para trailing TP inverso)
+    /// SHORT: minimum price seen while position is open (for inverse trailing TP)
     pub price_trough: f64,
 }
 
@@ -74,10 +74,10 @@ impl DcaStrategy {
     }
 
     // -----------------------------------------------------------
-    // Métricas del portfolio DCA
+    // DCA portfolio metrics
     // -----------------------------------------------------------
 
-    /// Precio promedio de entrada (compra en LONG, venta en SHORT)
+    /// Average entry price (buy in LONG, sell in SHORT)
     pub fn average_cost(&self) -> f64 {
         let total_qty = self.total_quantity();
         if total_qty == 0.0 {
@@ -87,20 +87,20 @@ impl DcaStrategy {
         total_cost / total_qty
     }
 
-    /// Total de USDT involucrado en las entradas
-    /// LONG: total gastado en compras; SHORT: total recibido al vender
+    /// Total USDT involved in entries
+    /// LONG: total spent on buys; SHORT: total received on selling
     pub fn total_invested(&self) -> f64 {
         self.trades.iter().map(|t| t.cost).sum()
     }
 
-    /// Cantidad total del asset base (ej: BTC) en la posición
+    /// Total base asset quantity (e.g.: BTC) in position
     pub fn total_quantity(&self) -> f64 {
         self.trades.iter().map(|t| t.quantity).sum()
     }
 
-    /// P&L absoluto en USDT al precio actual
-    /// LONG:  ganancia cuando el precio sube  (current_value - cost)
-    /// SHORT: ganancia cuando el precio baja  (cost - current_value)
+    /// Absolute P&L in USDT at current price
+    /// LONG:  profit when price rises  (current_value - cost)
+    /// SHORT: profit when price falls  (cost - current_value)
     pub fn pnl(&self, current_price: f64) -> f64 {
         let current_value = self.total_quantity() * current_price;
         let invested = self.total_invested();
@@ -110,7 +110,7 @@ impl DcaStrategy {
         }
     }
 
-    /// P&L en porcentaje
+    /// P&L in percentage
     pub fn pnl_pct(&self, current_price: f64) -> f64 {
         let invested = self.total_invested();
         if invested == 0.0 {
@@ -125,7 +125,7 @@ impl DcaStrategy {
 
     /// Actualiza el contador regresivo y verifica el reset diario
     pub fn tick(&mut self, now: DateTime<Utc>) {
-        // Reset diario
+        // Daily reset
         let today = now.day();
         if today != self.last_reset_day {
             self.daily_spent = 0.0;
@@ -138,12 +138,12 @@ impl DcaStrategy {
             let elapsed = now.signed_duration_since(last_time).num_seconds();
             self.next_buy_in_secs = (interval_secs - elapsed).max(0);
         } else {
-            self.next_buy_in_secs = 0; // primera entrada: inmediata
+            self.next_buy_in_secs = 0; // first entry: immediate
         }
     }
 
-    /// Decide si se debe ejecutar una entrada DCA ahora
-    /// LONG: comprar; SHORT: vender base asset
+    /// Decides if a DCA entry should be executed now
+    /// LONG: buy; SHORT: sell base asset
     pub fn should_buy(&self, current_price: f64, now: DateTime<Utc>, max_daily: f64) -> bool {
         if !self.state.is_active() {
             return false;
@@ -159,7 +159,7 @@ impl DcaStrategy {
             return false;
         }
 
-        // Primera entrada: inmediata
+        // First entry: immediate
         if self.last_buy_time.is_none() {
             return true;
         }
@@ -193,10 +193,10 @@ impl DcaStrategy {
     }
 
     // -----------------------------------------------------------
-    // Lógica de trailing extremo (peak para LONG, trough para SHORT)
+    // Trailing extreme logic (peak for LONG, trough for SHORT)
     // -----------------------------------------------------------
 
-    /// LONG: actualiza el precio máximo visto mientras hay posición abierta
+    /// LONG: updates maximum price seen while position is open
     pub fn update_price_peak(&mut self, price: f64) {
         if !self.trades.is_empty() {
             match self.config.direction {
@@ -214,8 +214,8 @@ impl DcaStrategy {
         }
     }
 
-    /// LONG: Trailing Take Profit: cierra si el precio cayó X% desde el máximo Y sigue en ganancia
-    /// SHORT: Trailing Take Profit: cierra si el precio subió X% desde el mínimo Y sigue en ganancia
+    /// LONG: Trailing Take Profit: closes if price fell X% from the maximum AND is still in profit
+    /// SHORT: Trailing Take Profit: closes if price rose X% from the minimum AND is still in profit
     pub fn should_trailing_tp(&self, current_price: f64) -> bool {
         if self.trades.is_empty() || self.config.trailing_tp_pct <= 0.0 {
             return false;
@@ -236,7 +236,7 @@ impl DcaStrategy {
             }
             Direction::Short => {
                 if self.price_trough >= avg || self.price_trough == f64::MAX {
-                    return false; // nunca estuvo en ganancia
+                    return false; // never was in profit
                 }
                 let rise_from_trough =
                     ((current_price - self.price_trough) / self.price_trough) * 100.0;
@@ -245,7 +245,7 @@ impl DcaStrategy {
         }
     }
 
-    /// Precio que dispararía el trailing TP (para mostrar en TUI)
+    /// Price that would trigger trailing TP (for TUI display)
     pub fn trailing_tp_trigger_price(&self) -> f64 {
         if self.config.trailing_tp_pct <= 0.0 {
             return 0.0;
@@ -266,9 +266,9 @@ impl DcaStrategy {
         }
     }
 
-    /// Decide si se debe tomar ganancias (cerrar posición)
-    /// LONG: gana cuando precio sube sobre costo promedio
-    /// SHORT: gana cuando precio baja bajo precio promedio de venta
+    /// Decides if profit should be taken (close position)
+    /// LONG: profit when price rises above average cost
+    /// SHORT: profit when price falls below average sell price
     pub fn should_take_profit(&self, current_price: f64) -> bool {
         if self.trades.is_empty() || self.config.take_profit_pct <= 0.0 {
             return false;
@@ -284,9 +284,9 @@ impl DcaStrategy {
         gain_pct >= self.config.take_profit_pct
     }
 
-    /// Decide si se debe activar el stop loss (cerrar posición)
-    /// LONG: pierde cuando precio cae bajo costo promedio
-    /// SHORT: pierde cuando precio sube sobre precio promedio de venta
+    /// Decides if stop loss should be activated (close position)
+    /// LONG: loss when price falls below average cost
+    /// SHORT: loss when price rises above average sell price
     pub fn should_stop_loss(&self, current_price: f64) -> bool {
         if self.trades.is_empty() || self.config.stop_loss_pct <= 0.0 {
             return false;
@@ -316,7 +316,7 @@ impl DcaStrategy {
         }
     }
 
-    /// Registra una entrada exitosa (compra en LONG, venta en SHORT)
+    /// Records a successful entry (buy in LONG, sell in SHORT)
     pub fn record_buy(&mut self, order_id: u64, price: f64, quantity: f64, cost: f64) {
         let now = Utc::now();
         self.trades.push(DcaTrade::new(order_id, price, quantity, cost));
@@ -330,7 +330,7 @@ impl DcaStrategy {
         }
     }
 
-    /// Limpia las operaciones tras cerrar la posición (TP / SL)
+    /// Clears trades after closing position (TP / SL)
     pub fn clear_trades(&mut self) {
         self.trades.clear();
         self.last_buy_time = None;
@@ -339,7 +339,7 @@ impl DcaStrategy {
         self.price_trough = f64::MAX;
     }
 
-    /// Formatea el tiempo hasta próxima entrada como "MM:SS"
+    /// Formats time until next entry as "MM:SS"
     pub fn next_buy_countdown(&self) -> String {
         if !self.state.is_active() {
             return "--:--".to_string();
@@ -351,7 +351,7 @@ impl DcaStrategy {
         format!("{:02}:{:02}", secs / 60, secs % 60)
     }
 
-    /// Crea un snapshot del estado actual para persistencia
+    /// Creates a snapshot of current state for persistence
     pub fn to_snapshot(&self, symbol: &str) -> StrategySnapshot {
         StrategySnapshot {
             symbol: symbol.to_string(),
@@ -366,7 +366,7 @@ impl DcaStrategy {
         }
     }
 
-    /// Restaura el estado desde un snapshot (el estado queda en Idle por seguridad)
+    /// Restores state from a snapshot (state remains Idle for safety)
     pub fn restore_from_snapshot(&mut self, snapshot: StrategySnapshot) {
         self.config.direction = snapshot.direction;
         self.trades = snapshot.trades;
@@ -376,7 +376,7 @@ impl DcaStrategy {
         self.last_reset_day = snapshot.last_reset_day;
         self.price_peak = snapshot.price_peak;
         self.price_trough = snapshot.price_trough;
-        // state se mantiene Idle — el usuario debe reactivar manualmente
+        // state remains Idle — user must reactivate manually
     }
 }
 
@@ -384,7 +384,7 @@ impl DcaStrategy {
 // Persistencia del estado de la estrategia
 // ---------------------------------------------------------------------------
 
-/// Snapshot serializable del estado DCA
+/// Serializable snapshot of DCA state
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StrategySnapshot {
     pub symbol: String,

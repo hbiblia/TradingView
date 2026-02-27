@@ -31,7 +31,7 @@ pub struct AccountInfo {
 }
 
 impl AccountInfo {
-    /// Retorna el balance libre de un asset (ej: "BTC", "USDT")
+    /// Returns internal free balance of an asset (e.g.: "BTC", "USDT")
     pub fn get_free(&self, asset: &str) -> f64 {
         self.balances
             .iter()
@@ -40,7 +40,7 @@ impl AccountInfo {
             .unwrap_or(0.0)
     }
 
-    /// Retorna balances no-cero para mostrar en el UI
+    /// Returns non-zero balances for UI display
     pub fn non_zero_balances(&self) -> Vec<&Balance> {
         self.balances
             .iter()

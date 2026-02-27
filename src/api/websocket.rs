@@ -32,18 +32,18 @@ pub async fn run_price_stream(
             .join("/");
         let ws_url = format!("{}/stream?streams={}", MAINNET_WS, streams);
 
-        tracing::info!("Conectando WebSocket ({} símbolo(s))", symbols.len());
+        tracing::info!("Connecting WebSocket ({} symbol(s))", symbols.len());
 
         tokio::select! {
             result = connect_and_stream(&ws_url, price_tx.clone()) => {
                 match result {
-                    Ok(_) => tracing::warn!("WebSocket cerrado, reconectando..."),
-                    Err(e) => tracing::error!("WebSocket error: {}, reconectando en 5s...", e),
+                    Ok(_) => tracing::warn!("WebSocket closed, reconnecting..."),
+                    Err(e) => tracing::error!("WebSocket error: {}, reconnecting in 5s...", e),
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
             _ = symbol_rx.changed() => {
-                tracing::info!("Símbolos cambiados, reconectando WebSocket...");
+                tracing::info!("Symbols changed, reconnecting WebSocket...");
             }
         }
     }
@@ -56,7 +56,7 @@ async fn connect_and_stream(
     let (ws_stream, _response) = connect_async(ws_url).await?;
     let (mut write, mut read) = ws_stream.split();
 
-    tracing::info!("WebSocket conectado");
+    tracing::info!("WebSocket connected");
 
     while let Some(msg) = read.next().await {
         match msg {
@@ -67,7 +67,7 @@ async fn connect_and_stream(
                 } else if let Ok(event) = serde_json::from_str::<MiniTickerEvent>(&text) {
                     Some(event)
                 } else {
-                    tracing::warn!("JSON no reconocido: {}", &text[..text.len().min(120)]);
+                    tracing::warn!("JSON not recognized: {}", &text[..text.len().min(120)]);
                     None
                 };
 
@@ -79,7 +79,7 @@ async fn connect_and_stream(
                 write.send(Message::Pong(data)).await?;
             }
             Ok(Message::Close(_)) => {
-                tracing::warn!("WebSocket: servidor cerró la conexión");
+                tracing::warn!("WebSocket: server closed the connection");
                 break;
             }
             Err(e) => {

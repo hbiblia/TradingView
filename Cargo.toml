@@ -1,9 +1,9 @@
 [package]
-name = "tradingbot"
+name = "trading-view"
 version = "0.1.0"
 edition = "2021"
-authors = ["TradingBot DCA"]
-description = "Automated DCA trading bot for Binance Spot"
+authors = ["@hbiblia"]
+description = "Automated DCA trading bot for Binance Spot with a real-time terminal interface (TUI), featuring multi-slot management, advanced exit strategies like Trailing Take Profit, and integrated support/resistance alerts."
 
 [dependencies]
 # Async runtime

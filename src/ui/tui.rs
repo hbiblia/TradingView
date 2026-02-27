@@ -19,11 +19,11 @@ use ratatui::{
 };
 use tokio::sync::{mpsc, Mutex};
 
-use crate::app::{AppCommand, AppState, SaleResult, UiMode, SYMBOLS, MAX_SLOTS};
+use crate::app::{AppCommand, AppState, SaleResult, UiMode, MAX_SLOTS};
 use crate::config::Direction as TradeDirection;
 use crate::strategy::dca::DcaState;
 
-const TICK_MS: u64 = 150; // ~6 FPS de refresco
+const TICK_MS: u64 = 150; // ~6 FPS refresh rate
 
 pub struct Tui {
     terminal: Terminal<CrosstermBackend<Stdout>>,
@@ -236,7 +236,7 @@ impl Tui {
         let content_chunks = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
-                Constraint::Length(9), // precio + DCA stats
+                Constraint::Length(10), // precio + DCA stats (10 = 8 contenido + 2 bordes + 1 S/R)
                 Constraint::Min(6),    // historial de operaciones
             ])
             .split(body_chunks[1]);
@@ -283,12 +283,12 @@ impl Tui {
         let title_spans = if let Some(slot) = state.selected() {
             let symbol = format!("{} / {}", slot.base_asset, slot.quote_asset);
             let (status_color, status_label) = match &slot.strategy.state {
-                DcaState::Running           => (Color::Green, "● ACTIVO"),
+                DcaState::Running           => (Color::Green, "● ACTIVE"),
                 DcaState::TakeProfitReached => (Color::Cyan, "✓ TAKE PROFIT"),
                 DcaState::StopLossReached   => (Color::Red, "✗ STOP LOSS"),
-                DcaState::MaxOrdersReached  => (Color::Yellow, "■ MAX ÓRDENES"),
+                DcaState::MaxOrdersReached  => (Color::Yellow, "■ MAX ORDERS"),
                 DcaState::Error(_)          => (Color::Red, "✗ ERROR"),
-                DcaState::Idle              => (Color::DarkGray, "○ DETENIDO"),
+                DcaState::Idle              => (Color::DarkGray, "○ STOPPED"),
             };
             let (dir_label, dir_color) = match slot.strategy.config.direction {
                 TradeDirection::Long  => ("▲ LONG",  Color::Green),
@@ -296,7 +296,7 @@ impl Tui {
             };
             vec![
                 Span::styled(
-                    " BINANCE DCA BOT ",
+                    " Trading View ",
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("│ "),
@@ -321,12 +321,12 @@ impl Tui {
         } else {
             vec![
                 Span::styled(
-                    " BINANCE DCA BOT ",
+                    " Trading View ",
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
                 Span::raw("│ "),
                 Span::styled(
-                    "Sin estrategias activas — Presiona [S] para comenzar",
+                    "No active strategies — Press [S] to start",
                     Style::default().fg(Color::DarkGray),
                 ),
                 Span::raw(" │ "),
@@ -395,7 +395,7 @@ impl Tui {
         // Pista para agregar nueva estrategia
         if state.slots.len() < MAX_SLOTS {
             lines.push(Line::from(Span::styled(
-                "  [S] Nueva",
+                "  [S] New",
                 Style::default().fg(Color::DarkGray),
             )));
         }
@@ -440,7 +440,7 @@ impl Tui {
             let change_color = if market.change_24h_pct >= 0.0 { Color::Green } else { Color::Red };
             let change_sign  = if market.change_24h_pct >= 0.0 { "+" } else { "" };
 
-            let price_text = vec![
+            let mut price_text = vec![
                 Line::from(vec![
                     Span::styled(
                         format!(" ${:.2}", market.price),
@@ -470,10 +470,30 @@ impl Tui {
                 ]),
             ];
 
+            // Niveles S/R (disponibles después del primer ciclo del alert engine)
+            if let Some(sym) = state.selected().map(|s| s.symbol.clone()) {
+                if let Some(level) = state.alert_levels.get(&sym) {
+                    if level.resistance > 0.0 {
+                        price_text.push(Line::from(vec![
+                            Span::styled(" S:", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("${:.0}", level.support),
+                                Style::default().fg(Color::Green),
+                            ),
+                            Span::styled("  R:", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("${:.0}", level.resistance),
+                                Style::default().fg(Color::Red),
+                            ),
+                        ]));
+                    }
+                }
+            }
+
             f.render_widget(
                 Paragraph::new(price_text).block(
                     Block::default()
-                        .title(" Precio ")
+                        .title(" Price ")
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(Color::Cyan)),
@@ -489,7 +509,7 @@ impl Tui {
                 None => {
                     f.render_widget(
                         Block::default()
-                            .title(" Estrategia DCA ")
+                            .title(" DCA Strategy ")
                             .borders(Borders::ALL)
                             .border_type(BorderType::Rounded)
                             .border_style(Style::default().fg(Color::Magenta)),
@@ -533,7 +553,7 @@ impl Tui {
                             Span::styled(" Trail TP:   ", Style::default().fg(Color::DarkGray)),
                             Span::styled(
                                 format!(
-                                    "pico ${:.4}  cierra <${:.4} ({:.2}%↓)",
+                                    "peak ${:.4}  closes <${:.4} ({:.2}%↓)",
                                     price_peak, trailing_trigger, drop_so_far
                                 ),
                                 Style::default().fg(trigger_color),
@@ -541,7 +561,7 @@ impl Tui {
                         ])
                     } else {
                         Line::from(vec![
-                            Span::styled(" Próx compra: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(" Next buy:    ", Style::default().fg(Color::DarkGray)),
                             Span::styled(countdown, Style::default().fg(Color::Cyan)),
                         ])
                     }
@@ -560,7 +580,7 @@ impl Tui {
                             Span::styled(" Trail TP:   ", Style::default().fg(Color::DarkGray)),
                             Span::styled(
                                 format!(
-                                    "piso ${:.4}  cierra >${:.4} ({:.2}%↑)",
+                                    "trough ${:.4}  closes >${:.4} ({:.2}%↑)",
                                     price_trough, trailing_trigger, rise_so_far
                                 ),
                                 Style::default().fg(trigger_color),
@@ -568,7 +588,7 @@ impl Tui {
                         ])
                     } else {
                         Line::from(vec![
-                            Span::styled(" Próx venta:  ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(" Next sell:   ", Style::default().fg(Color::DarkGray)),
                             Span::styled(countdown, Style::default().fg(Color::Cyan)),
                         ])
                     }
@@ -576,8 +596,8 @@ impl Tui {
             };
 
             let (avg_label, invested_label, qty_label, entry_label) = match direction {
-                TradeDirection::Long  => (" Costo prom: ",  " Invertido:  ", " Cantidad:   ", " Monto/compra:"),
-                TradeDirection::Short => (" Precio venta:", " Recibido:   ", " Vendido:    ", " Monto/venta: "),
+                TradeDirection::Long  => (" Avg cost:    ", " Invested:   ", " Quantity:   ", " Buy amount:  "),
+                TradeDirection::Short => (" Sell price:  ", " Received:   ", " Sold:       ", " Sell amount: "),
             };
 
             let dca_text = vec![
@@ -608,7 +628,7 @@ impl Tui {
                 ]),
                 trailing_line,
                 Line::from(vec![
-                    Span::styled(" Órdenes:    ", Style::default().fg(Color::DarkGray)),
+                    Span::styled(" Orders:     ", Style::default().fg(Color::DarkGray)),
                     Span::styled(
                         format!("{} / {}", orders_count, max_orders),
                         Style::default().fg(Color::White),
@@ -617,7 +637,7 @@ impl Tui {
                 Line::from(vec![
                     Span::styled(entry_label, Style::default().fg(Color::DarkGray)),
                     Span::styled(
-                        format!(" ${:.2}  Hoy: ${:.2}", quote_amount, daily_spent),
+                        format!(" ${:.2}  Today: ${:.2}", quote_amount, daily_spent),
                         Style::default().fg(Color::Yellow),
                     ),
                 ]),
@@ -626,7 +646,7 @@ impl Tui {
             f.render_widget(
                 Paragraph::new(dca_text).block(
                     Block::default()
-                        .title(" Estrategia DCA ")
+                        .title(" DCA Strategy ")
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(Color::Magenta)),
@@ -646,7 +666,7 @@ impl Tui {
             None => {
                 f.render_widget(
                     Block::default()
-                        .title(" Historial de Operaciones ")
+                        .title(" Trade History ")
                         .borders(Borders::ALL)
                         .border_type(BorderType::Rounded)
                         .border_style(Style::default().fg(Color::Blue)),
@@ -660,10 +680,10 @@ impl Tui {
         let direction = &slot.strategy.config.direction;
 
         let entry_col_header = match direction {
-            TradeDirection::Long  => "Precio Compra",
-            TradeDirection::Short => "Precio Venta",
+            TradeDirection::Long  => "Buy Price",
+            TradeDirection::Short => "Sell Price",
         };
-        let header_arr = ["#", entry_col_header, "Cantidad", "USDT", "P&L actual", "Fecha/Hora"];
+        let header_arr = ["#", entry_col_header, "Quantity", "USDT", "Current P&L", "Date/Time"];
         let header_cells = header_arr.into_iter().map(|h| {
             Cell::from(h).style(Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD))
         });
@@ -714,7 +734,7 @@ impl Tui {
             .block(
                 Block::default()
                     .title(format!(
-                        " Historial de Operaciones ({}) ",
+                        " Trade History ({}) ",
                         slot.strategy.trades.len()
                     ))
                     .borders(Borders::ALL)
@@ -741,6 +761,8 @@ impl Tui {
                     Color::Red
                 } else if msg.contains("STOP LOSS") {
                     Color::Red
+                } else if msg.contains("ALERT") {
+                    Color::Yellow
                 } else if msg.contains("TAKE PROFIT") || msg.contains("TRAILING TP") {
                     Color::Green
                 } else if msg.contains("SHORT #") {
@@ -777,60 +799,60 @@ impl Tui {
             UiMode::RestoreSession(_) => vec![
                 Span::raw(" "),
                 Span::styled("[C / Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::raw(" Continuar  "),
+                Span::raw(" Continue  "),
                 Span::styled("[N / Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Span::raw(" Nueva sesión"),
+                Span::raw(" New session"),
             ],
             UiMode::NewStrategy => vec![
                 Span::raw(" "),
                 Span::styled("[↑↓]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(" Símbolo  "),
+                Span::raw(" Symbol  "),
                 Span::styled("[Tab]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" LONG/SHORT  "),
                 Span::styled("[←→]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
-                Span::raw(" Reinicio  "),
+                Span::raw(" Restart  "),
                 Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::raw(" Iniciar  "),
+                Span::raw(" Start  "),
                 Span::styled("[Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Span::raw(" Cancelar"),
+                Span::raw(" Cancel"),
             ],
             UiMode::Config => vec![
                 Span::raw(" "),
                 Span::styled("[0-9 .]", Style::default().fg(Color::Cyan)),
-                Span::raw(" Ingresar monto  "),
+                Span::raw(" Enter amount  "),
                 Span::styled("[Enter]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::raw(" Confirmar  "),
+                Span::raw(" Confirm  "),
                 Span::styled("[Esc]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Span::raw(" Cancelar"),
+                Span::raw(" Cancel"),
             ],
             UiMode::PostSale(_slot_id, _) => vec![
                 Span::raw(" "),
                 Span::styled("[S]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::raw(" Reiniciar ciclo  "),
-                Span::styled("[Esc / cualquier tecla]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" Quedar detenido"),
+                Span::raw(" Restart cycle  "),
+                Span::styled("[Esc / any key]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
+                Span::raw(" Stay stopped"),
             ],
             UiMode::ConfirmClose => vec![
                 Span::raw(" "),
                 Span::styled("[Enter / Y]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Span::raw(" Cerrar posición a mercado  "),
+                Span::raw(" Close market position  "),
                 Span::styled("[Esc / N]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" Cancelar"),
+                Span::raw(" Cancel"),
             ],
             UiMode::Normal => vec![
                 Span::raw(" "),
                 Span::styled("[S]", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-                Span::raw(" Nueva  "),
+                Span::raw(" New  "),
                 Span::styled("[X]", Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD)),
-                Span::raw(" Pausar  "),
+                Span::raw(" Pause  "),
                 Span::styled("[V]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Span::raw(" Vender ahora  "),
+                Span::raw(" Sell now  "),
                 Span::styled("[C]", Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)),
                 Span::raw(" Config  "),
                 Span::styled("[↑↓]", Style::default().fg(Color::Cyan)),
                 Span::raw(" Slots  "),
                 Span::styled("[Q]", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-                Span::raw(" Salir"),
+                Span::raw(" Exit"),
             ],
         };
 
@@ -866,7 +888,7 @@ impl Tui {
         f.render_widget(Clear, area);
         f.render_widget(
             Block::default()
-                .title(" ↩ Sesiones anteriores encontradas ")
+                .title(" ↩ Previous sessions found ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(
@@ -887,7 +909,7 @@ impl Tui {
         let mut lines = vec![
             Line::from(""),
             Line::from(Span::styled(
-                "  Sesiones guardadas:",
+                "  Saved sessions:",
                 Style::default().fg(Color::White),
             )),
             Line::from(""),
@@ -898,7 +920,7 @@ impl Tui {
                 TradeDirection::Long  => ("▲ LONG",  Color::Green),
                 TradeDirection::Short => ("▼ SHORT", Color::Red),
             };
-            let trade_label = if *count == 1 { "compra" } else { "compras" };
+            let trade_label = if *count == 1 { "buy" } else { "buys" };
             lines.push(Line::from(vec![
                 Span::styled("  ● ", Style::default().fg(Color::Cyan)),
                 Span::styled(
@@ -916,7 +938,7 @@ impl Tui {
 
         lines.push(Line::from(""));
         lines.push(Line::from(Span::styled(
-            "  ¿Deseas continuar donde lo dejaste?",
+            "  Do you want to continue where you left off?",
             Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
         )));
         lines.push(Line::from(""));
@@ -925,7 +947,7 @@ impl Tui {
                 "  [C / Enter] ",
                 Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
             ),
-            Span::styled("Continuar sesión anterior", Style::default().fg(Color::White)),
+            Span::styled("Continue previous session", Style::default().fg(Color::White)),
         ]));
         lines.push(Line::from(vec![
             Span::styled(
@@ -933,7 +955,7 @@ impl Tui {
                 Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
             ),
             Span::styled(
-                "Descartar y empezar desde cero",
+                "Discard and start from scratch",
                 Style::default().fg(Color::DarkGray),
             ),
         ]));
@@ -956,7 +978,7 @@ impl Tui {
         f.render_widget(Clear, area);
         f.render_widget(
             Block::default()
-                .title(" ▶ Nueva Estrategia DCA ")
+                .title(" ▶ New DCA Strategy ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(
@@ -1002,25 +1024,22 @@ impl Tui {
             Style::default().fg(Color::DarkGray)
         };
 
-        // Lista de símbolos (visible = 5)
+        // Lista de símbolos con scroll (visible = 5 a la vez)
         let visible = 5usize;
-        let offset = if state.new_strat_symbol_idx + 1 > visible {
-            state.new_strat_symbol_idx + 1 - visible
-        } else {
-            0
-        };
+        let sel = state.new_strat_symbol_idx.min(state.symbols.len().saturating_sub(1));
+        let offset = if sel + 1 > visible { sel + 1 - visible } else { 0 };
 
         let mut lines: Vec<Line> = vec![Line::from(Span::styled(
-            " Símbolo (↑↓):",
+            " Symbol (↑↓):",
             Style::default().fg(Color::DarkGray),
         ))];
 
-        for (idx, &sym) in SYMBOLS.iter().enumerate().skip(offset).take(visible) {
+        for (idx, sym) in state.symbols.iter().enumerate().skip(offset).take(visible) {
             let is_sel = idx == state.new_strat_symbol_idx;
-            let is_used = used_symbols.contains(&sym.to_string());
+            let is_used = used_symbols.contains(sym);
             let prefix = if is_sel { " ► " } else { "   " };
             let label = if is_used {
-                format!("{}{} ← en uso", prefix, sym)
+                format!("{}{} ← in use", prefix, sym)
             } else {
                 format!("{}{}", prefix, sym)
             };
@@ -1036,14 +1055,14 @@ impl Tui {
 
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled(" Dirección (Tab):  ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" Direction (Tab):  ", Style::default().fg(Color::DarkGray)),
             Span::styled(" ▲ LONG ", dir_long_style),
             Span::raw("  "),
             Span::styled(" ▼ SHORT ", dir_short_style),
         ]));
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
-            Span::styled(" Reinicio (←→):   ", Style::default().fg(Color::DarkGray)),
+            Span::styled(" Restart (←→):     ", Style::default().fg(Color::DarkGray)),
             Span::styled(" Manual ", manual_style),
             Span::raw("  "),
             Span::styled(" Auto ", auto_style),
@@ -1051,9 +1070,9 @@ impl Tui {
         lines.push(Line::from(""));
         lines.push(Line::from(vec![
             Span::styled("  [Enter] ", Style::default().fg(Color::Green).add_modifier(Modifier::BOLD)),
-            Span::styled("Iniciar  ", Style::default().fg(Color::White)),
+            Span::styled("Start    ", Style::default().fg(Color::White)),
             Span::styled("[Esc] ", Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
-            Span::styled("Cancelar", Style::default().fg(Color::DarkGray)),
+            Span::styled("Cancel", Style::default().fg(Color::DarkGray)),
         ]));
 
         f.render_widget(Paragraph::new(lines), inner);
@@ -1074,7 +1093,7 @@ impl Tui {
         f.render_widget(Clear, area);
         f.render_widget(
             Block::default()
-                .title(" ⚙ Monto USDT ")
+                .title(" ⚙ USDT Amount ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(
@@ -1101,7 +1120,7 @@ impl Tui {
         let lines = vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled(" Actual: ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" Current: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("${:.2} USDT", current),
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
@@ -1109,7 +1128,7 @@ impl Tui {
             ]),
             Line::from(""),
             Line::from(vec![
-                Span::styled(" Nuevo:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled(" New:     ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{}▌", if buf.is_empty() { "_" } else { buf }),
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
@@ -1118,7 +1137,7 @@ impl Tui {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                " (aplica a todos los slots)",
+                " (applies to all slots)",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
@@ -1127,12 +1146,12 @@ impl Tui {
                     "  [Enter] ",
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Confirmar  ", Style::default().fg(Color::White)),
+                Span::styled("Confirm    ", Style::default().fg(Color::White)),
                 Span::styled(
                     "[Esc] ",
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Cancelar", Style::default().fg(Color::DarkGray)),
+                Span::styled("Cancel", Style::default().fg(Color::DarkGray)),
             ]),
         ];
 
@@ -1154,7 +1173,7 @@ impl Tui {
         f.render_widget(Clear, area);
         f.render_widget(
             Block::default()
-                .title(" ⚡ Cerrar Posición a Mercado ")
+                .title(" ⚡ Market Close Position ")
                 .borders(Borders::ALL)
                 .border_type(BorderType::Rounded)
                 .border_style(Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
@@ -1173,8 +1192,8 @@ impl Tui {
 
         let (symbol, qty, pnl, pnl_pct, dir_label, quote) = if let Some(sl) = slot {
             let dir = match sl.strategy.config.direction {
-                TradeDirection::Long  => "SELL a mercado",
-                TradeDirection::Short => "BUY a mercado (recompra)",
+                TradeDirection::Long  => "Market SELL",
+                TradeDirection::Short => "Market BUY (rebuy)",
             };
             (
                 sl.symbol.clone(),
@@ -1193,22 +1212,22 @@ impl Tui {
         let lines = vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled("  Par:      ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Pair:      ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     symbol,
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("  Acción:   ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Action:   ", Style::default().fg(Color::DarkGray)),
                 Span::styled(dir_label, Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)),
             ]),
             Line::from(vec![
-                Span::styled("  Cantidad: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Quantity: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(format!("{:.6}", qty), Style::default().fg(Color::White)),
             ]),
             Line::from(vec![
-                Span::styled("  P&L act.: ", Style::default().fg(Color::DarkGray)),
+                Span::styled("  Curr. P&L: ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("{}{:.2} {} ({}{:.2}%)", pnl_sign, pnl, quote, pnl_sign, pnl_pct),
                     Style::default().fg(pnl_color).add_modifier(Modifier::BOLD),
@@ -1216,7 +1235,7 @@ impl Tui {
             ]),
             Line::from(""),
             Line::from(Span::styled(
-                "  Esta acción no espera el take profit.",
+                "  This action does not wait for take profit.",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::from(""),
@@ -1225,12 +1244,12 @@ impl Tui {
                     "  [Enter / Y] ",
                     Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Ejecutar ahora  ", Style::default().fg(Color::White)),
+                Span::styled("Execute now    ", Style::default().fg(Color::White)),
                 Span::styled(
                     "[Esc / N] ",
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Cancelar", Style::default().fg(Color::DarkGray)),
+                Span::styled("Cancel", Style::default().fg(Color::DarkGray)),
             ]),
         ];
 
@@ -1282,14 +1301,14 @@ impl Tui {
         let lines = vec![
             Line::from(""),
             Line::from(vec![
-                Span::styled("Recibido:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Received:  ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!("${:.2} {}", result.received, quote_asset),
                     Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
                 ),
             ]),
             Line::from(vec![
-                Span::styled("Ganancia:  ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Profit:    ", Style::default().fg(Color::DarkGray)),
                 Span::styled(
                     format!(
                         "{}{:.2} {} ({}{:.2}%)",
@@ -1305,7 +1324,7 @@ impl Tui {
             )),
             Line::from(""),
             Line::from(Span::styled(
-                "¿Qué querés hacer?",
+                "What do you want to do?",
                 Style::default().fg(Color::White).add_modifier(Modifier::BOLD),
             )),
             Line::from(""),
@@ -1315,16 +1334,16 @@ impl Tui {
                     Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
                 ),
                 Span::styled(
-                    "Reiniciar ciclo DCA inmediatamente",
+                    "Restart DCA cycle immediately",
                     Style::default().fg(Color::White),
                 ),
             ]),
             Line::from(vec![
                 Span::styled(
-                    "  [Esc / cualquier tecla] ",
+                    "  [Esc / any key] ",
                     Style::default().fg(Color::Yellow).add_modifier(Modifier::BOLD),
                 ),
-                Span::styled("Quedar detenido", Style::default().fg(Color::DarkGray)),
+                Span::raw("Stay stopped"),
             ]),
         ];
 

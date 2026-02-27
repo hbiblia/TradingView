@@ -11,12 +11,12 @@ use crate::config::BinanceConfig;
 use crate::models::{
     account::AccountInfo,
     order::Order,
-    ticker::TickerPrice,
+    ticker::{Kline, TickerPrice},
 };
 
 type HmacSha256 = Hmac<Sha256>;
 
-/// URLs base de Binance
+/// Binance base URLs
 const MAINNET_URL: &str = "https://api.binance.com";
 const TESTNET_URL: &str = "https://testnet.binance.vision";
 
@@ -24,7 +24,7 @@ pub struct BinanceClient {
     http: Client,
     secret: String,
     base_url: String,
-    /// Diferencia en ms entre el reloj local y el servidor de Binance
+    /// Offset in ms between local clock and Binance server
     time_offset_ms: AtomicI64,
 }
 
@@ -34,7 +34,7 @@ impl BinanceClient {
         headers.insert(
             "X-MBX-APIKEY",
             header::HeaderValue::from_str(&config.api_key)
-                .map_err(|_| anyhow!("API key inválida"))?,
+                .map_err(|_| anyhow!("Invalid API key"))?,
         );
 
         let http = Client::builder()
@@ -49,7 +49,7 @@ impl BinanceClient {
         };
 
         tracing::info!(
-            "Cliente Binance inicializado ({})",
+            "Binance client initialized ({})",
             if config.testnet { "TESTNET" } else { "MAINNET" }
         );
 
@@ -62,12 +62,12 @@ impl BinanceClient {
     }
 
     // -------------------------------------------------------
-    // Helpers internos
+    // Internal helpers
     // -------------------------------------------------------
 
     fn sign(&self, payload: &str) -> String {
         let mut mac = HmacSha256::new_from_slice(self.secret.as_bytes())
-            .expect("HMAC acepta claves de cualquier tamaño");
+            .expect("HMAC accepts keys of any size");
         mac.update(payload.as_bytes());
         hex::encode(mac.finalize().into_bytes())
     }
@@ -83,7 +83,7 @@ impl BinanceClient {
         }
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
-        // Intentar parsear mensaje de error de Binance
+        // Try to parse Binance error message
         if let Ok(val) = serde_json::from_str::<Value>(&text) {
             let code = val["code"].as_i64().unwrap_or(0);
             let msg = val["msg"].as_str().unwrap_or(&text);
@@ -94,18 +94,18 @@ impl BinanceClient {
     }
 
     // -------------------------------------------------------
-    // Endpoints públicos (sin firma)
+    // Public endpoints (no signature)
     // -------------------------------------------------------
 
-    /// Test de conectividad
+    /// Connectivity test
     pub async fn ping(&self) -> Result<()> {
         let url = format!("{}/api/v3/ping", self.base_url);
         self.http.get(&url).send().await?;
         Ok(())
     }
 
-    /// Sincroniza el reloj local con el servidor de Binance para evitar error -1021.
-    /// Calcula el offset y lo almacena para aplicarlo en cada timestamp firmado.
+    /// Local clock synchronization with Binance server to avoid error -1021.
+    /// Calculates the offset and stores it to apply it on each signed timestamp.
     pub async fn sync_time(&self) -> Result<()> {
         let local_before = Utc::now().timestamp_millis();
         let url = format!("{}/api/v3/time", self.base_url);
@@ -114,31 +114,82 @@ impl BinanceClient {
 
         let server_time = resp["serverTime"]
             .as_i64()
-            .ok_or_else(|| anyhow!("Respuesta de tiempo de Binance inválida"))?;
+            .ok_or_else(|| anyhow!("Invalid Binance time response"))?;
 
-        // Aproximamos el tiempo local en el momento en que el servidor lo procesó
+        // Approximate local time when the server processed it
         let local_mid = (local_before + local_after) / 2;
         let offset = server_time - local_mid;
 
         self.time_offset_ms.store(offset, Ordering::Relaxed);
-        tracing::info!("Sincronización de tiempo: offset {}ms (reloj local {}ms respecto a Binance)", offset, offset.abs());
+        tracing::info!("Time sync: offset {}ms (local clock is {}ms off Binance)", offset, offset.abs());
         Ok(())
     }
 
-    /// Precio actual de un símbolo
+    /// Gets all active USDT pairs in Spot — public endpoint, no signature.
+    /// Returns the list sorted alphabetically.
+    pub async fn get_usdt_symbols(&self) -> Result<Vec<String>> {
+        let url = format!("{}/api/v3/exchangeInfo", self.base_url);
+        let resp: serde_json::Value = self.http.get(&url).send().await?.json().await?;
+
+        let mut symbols: Vec<String> = resp["symbols"]
+            .as_array()
+            .ok_or_else(|| anyhow!("exchangeInfo: 'symbols' field not found"))?
+            .iter()
+            .filter_map(|s| {
+                let symbol = s["symbol"].as_str()?;
+                let status = s["status"].as_str()?;
+                let quote  = s["quoteAsset"].as_str()?;
+                let is_spot = s["isSpotTradingAllowed"].as_bool().unwrap_or(false);
+                let permissions = s["permissions"].as_array()?;
+                let is_margin = permissions.iter().any(|p| p == "MARGIN" || p == "ISOLATED_MARGIN");
+
+                if status == "TRADING" && quote == "USDT" && is_spot && is_margin {
+                    Some(symbol.to_string())
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        symbols.sort();
+        Ok(symbols)
+    }
+
+    /// Gets historical OHLC candles (klines) — public endpoint, no signature
+    /// Returns up to `limit` candles of the indicated `interval` (e.g.: "1h", "4h", "1d")
+    pub async fn get_klines(&self, symbol: &str, interval: &str, limit: u32) -> Result<Vec<Kline>> {
+        let url = format!(
+            "{}/api/v3/klines?symbol={}&interval={}&limit={}",
+            self.base_url, symbol, interval, limit
+        );
+        // API returns Vec<Vec<Value>>; each candle is an array of 12+ elements:
+        // [open_time, open, high, low, close, volume, close_time, ...]
+        let resp: Vec<serde_json::Value> = self.http.get(&url).send().await?.json().await?;
+        let klines = resp
+            .into_iter()
+            .filter_map(|k| {
+                let high: f64 = k.get(2)?.as_str()?.parse().ok()?;
+                let low:  f64 = k.get(3)?.as_str()?.parse().ok()?;
+                Some(Kline { high, low })
+            })
+            .collect();
+        Ok(klines)
+    }
+
+    /// Current price of a symbol
     pub async fn get_price(&self, symbol: &str) -> Result<f64> {
         let url = format!("{}/api/v3/ticker/price?symbol={}", self.base_url, symbol);
         let resp: TickerPrice = self.http.get(&url).send().await?.json().await?;
         resp.price
             .parse::<f64>()
-            .map_err(|_| anyhow!("Precio inválido: {}", resp.price))
+            .map_err(|_| anyhow!("Invalid price: {}", resp.price))
     }
 
     // -------------------------------------------------------
-    // Endpoints privados (requieren firma HMAC-SHA256)
+    // Private endpoints (require HMAC-SHA256 signature)
     // -------------------------------------------------------
 
-    /// Información de la cuenta (balances, permisos)
+    /// Account info (balances, permissions)
     pub async fn get_account(&self) -> Result<AccountInfo> {
         let ts = self.timestamp_ms();
         let query = format!("timestamp={}", ts);
@@ -150,7 +201,7 @@ impl BinanceClient {
         Ok(resp.json::<AccountInfo>().await?)
     }
 
-    /// Orden de compra a mercado usando quoteOrderQty (monto en USDT)
+    /// Market buy order using quoteOrderQty (monto en USDT)
     pub async fn market_buy_quote(&self, symbol: &str, quote_qty: f64) -> Result<Order> {
         let ts = self.timestamp_ms();
         let body = format!(
@@ -173,8 +224,8 @@ impl BinanceClient {
         Ok(resp.json::<Order>().await?)
     }
 
-    /// Orden de compra a mercado usando quantity (cantidad base exacta, ej: BTC)
-    /// Usada para cerrar posiciones SHORT: recomprar la cantidad exacta vendida
+    /// Market buy order using quantity (exact base quantity, e.g.: BTC)
+    /// Used to close SHORT positions: rebuy the exact quantity sold
     pub async fn market_buy_qty(&self, symbol: &str, quantity: f64) -> Result<Order> {
         let ts = self.timestamp_ms();
         let body = format!(
@@ -197,7 +248,7 @@ impl BinanceClient {
         Ok(resp.json::<Order>().await?)
     }
 
-    /// Orden de venta a mercado usando quantity (cantidad base, ej: BTC)
+    /// Market sell order using quantity (base quantity, e.g.: BTC)
     pub async fn market_sell_qty(&self, symbol: &str, quantity: f64) -> Result<Order> {
         let ts = self.timestamp_ms();
         let body = format!(
@@ -220,7 +271,7 @@ impl BinanceClient {
         Ok(resp.json::<Order>().await?)
     }
 
-    /// Cancela una orden por su ID
+    /// Cancels an order by ID
     pub async fn cancel_order(&self, symbol: &str, order_id: u64) -> Result<Value> {
         let ts = self.timestamp_ms();
         let body = format!(

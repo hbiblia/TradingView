@@ -32,7 +32,7 @@ pub enum OrderStatus {
     Expired,
 }
 
-/// Respuesta de Binance al crear una orden
+/// Binance response when creating an order
 #[derive(Debug, Deserialize, Clone)]
 #[serde(rename_all = "camelCase")]
 pub struct Order {
@@ -50,13 +50,13 @@ pub struct Order {
     pub order_type: OrderType,
 }
 
-/// Registro interno de una operación DCA
+/// Internal record of a DCA operation
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DcaTrade {
     pub order_id: u64,
     pub buy_price: f64,
-    pub quantity: f64,  // cantidad base (ej: BTC)
-    pub cost: f64,      // costo total en quote (ej: USDT)
+    pub quantity: f64,  // base quantity (e.g.: BTC)
+    pub cost: f64,      // total cost in quote (e.g.: USDT)
     pub timestamp: DateTime<Utc>,
 }
 

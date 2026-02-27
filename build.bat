@@ -1,5 +1,5 @@
 @echo off
-echo Compilando tradingbot (release)...
+echo Compilando trading-view (release)...
 cargo build --release
 if %ERRORLEVEL% neq 0 (
     echo.
@@ -7,6 +7,6 @@ if %ERRORLEVEL% neq 0 (
     pause
     exit /b 1
 )
-copy /y target\release\tradingbot.exe bin\tradingbot.exe >nul
+copy /y target\release\trading-view.exe bin\trading-view.exe >nul
 echo.
-echo Listo! Binario actualizado: tradingbot.exe
+echo Listo! Binario actualizado: trading-view.exe

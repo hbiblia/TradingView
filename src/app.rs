@@ -6,8 +6,8 @@ use crate::strategy::dca::DcaStrategy;
 /// Máximo de estrategias simultáneas
 pub const MAX_SLOTS: usize = 4;
 
-/// Símbolos disponibles para seleccionar en el modal de nueva estrategia
-pub const SYMBOLS: &[&str] = &[
+/// Lista de respaldo cuando la API de Binance no está disponible
+pub const DEFAULT_SYMBOLS: &[&str] = &[
     "BTCUSDT", "ETHUSDT", "XRPUSDT", "ADAUSDT",
     "DOGEUSDT", "SOLUSDT", "TRXUSDT", "RONUSDT", "BNBUSDT",
 ];
@@ -19,6 +19,20 @@ pub struct MarketData {
     pub change_24h_pct: f64,
     pub high_24h: f64,
     pub low_24h: f64,
+}
+
+/// Niveles de soporte/resistencia calculados por el motor de alertas
+pub struct AlertLevel {
+    /// Resistencia: máximo de los highs en el rolling window
+    pub resistance: f64,
+    /// Soporte: mínimo de los lows en el rolling window
+    pub support: f64,
+    /// Último precio conocido (para detectar cruce de nivel)
+    pub prev_price: f64,
+    /// Instante de la última alerta de soporte disparada (para cooldown)
+    pub last_support_alert: Option<std::time::Instant>,
+    /// Instante de la última alerta de resistencia disparada (para cooldown)
+    pub last_resistance_alert: Option<std::time::Instant>,
 }
 
 /// Una estrategia DCA activa con su contexto de mercado
@@ -105,6 +119,10 @@ pub struct AppState {
     pub selected_slot: usize,
     /// Datos de precio por símbolo
     pub prices: HashMap<String, MarketData>,
+    /// Niveles S/R calculados por el motor de alertas (por símbolo)
+    pub alert_levels: HashMap<String, AlertLevel>,
+    /// Lista de pares disponibles obtenida de Binance al arrancar
+    pub symbols: Vec<String>,
     /// Ring buffer para mensajes de log (últimos 100)
     pub log: VecDeque<String>,
     pub should_quit: bool,
@@ -127,6 +145,16 @@ impl AppState {
         let ts = chrono::Utc::now().format("%H:%M:%S");
         let entry = format!("[{}] {}", ts, msg);
         tracing::info!("{}", msg);
+        if self.log.len() >= 100 {
+            self.log.pop_front();
+        }
+        self.log.push_back(entry);
+    }
+
+    pub fn log_alert(&mut self, msg: &str) {
+        let ts = chrono::Utc::now().format("%H:%M:%S");
+        let entry = format!("[{}] ALERT {}", ts, msg);
+        tracing::warn!("ALERT: {}", msg);
         if self.log.len() >= 100 {
             self.log.pop_front();
         }

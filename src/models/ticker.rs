@@ -1,13 +1,13 @@
 use serde::Deserialize;
 
-/// Respuesta de GET /api/v3/ticker/price
+/// Response from GET /api/v3/ticker/price
 #[derive(Debug, Deserialize, Clone)]
 pub struct TickerPrice {
     pub symbol: String,
     pub price: String,
 }
 
-/// Evento del stream WebSocket @miniTicker
+/// Event from WebSocket stream @miniTicker
 #[derive(Debug, Deserialize, Clone)]
 pub struct MiniTickerEvent {
     #[serde(rename = "e")]
@@ -16,32 +16,40 @@ pub struct MiniTickerEvent {
     pub event_time: u64,
     #[serde(rename = "s")]
     pub symbol: String,
-    /// Precio de cierre (último precio)
+    /// Closing price (last price)
     #[serde(rename = "c")]
     pub close_price: String,
-    /// Precio de apertura (24h)
+    /// Opening price (24h)
     #[serde(rename = "o")]
     pub open_price: String,
-    /// Precio máximo (24h)
+    /// High price (24h)
     #[serde(rename = "h")]
     pub high_price: String,
     /// Precio mínimo (24h)
     #[serde(rename = "l")]
     pub low_price: String,
-    /// Volumen base (24h)
+    /// Base volume (24h)
     #[serde(rename = "v")]
     pub base_volume: String,
-    /// Volumen cotización (24h)
+    /// Quote volume (24h)
     #[serde(rename = "q")]
     pub quote_volume: String,
 }
 
-/// Wrapper del combined stream de Binance (multi-símbolo)
+/// Binance combined stream wrapper (multi-symbol)
 /// Formato: {"stream":"btcusdt@miniTicker","data":{...MiniTickerEvent...}}
 #[derive(Debug, Deserialize, Clone)]
 pub struct CombinedStreamWrapper {
     pub stream: String,
     pub data: MiniTickerEvent,
+}
+
+/// An OHLC candle (result of GET /api/v3/klines)
+/// Only high and low are extracted, which are needed for S/R
+#[derive(Debug, Clone)]
+pub struct Kline {
+    pub high: f64,
+    pub low: f64,
 }
 
 impl MiniTickerEvent {

@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -e
 
-echo "Compilando tradingbot (release)..."
+echo "Compilando trading-view (release)..."
 cargo build --release
 
 mkdir -p bin
-cp target/release/tradingbot bin/tradingbot
+cp target/release/trading-view bin/trading-view
 
 echo ""
-echo "Listo! Binario actualizado: bin/tradingbot"
+echo "Listo! Binario actualizado: bin/trading-view"

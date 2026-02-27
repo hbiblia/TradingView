@@ -14,8 +14,8 @@ use tokio::sync::{mpsc, watch, Mutex};
 
 use api::client::BinanceClient;
 use api::websocket;
-use app::{AppCommand, AppState, SaleResult, StrategySlot, UiMode, SYMBOLS, MAX_SLOTS};
-use config::{Config, Direction, DcaConfig};
+use app::{AlertLevel, AppCommand, AppState, DEFAULT_SYMBOLS, SaleResult, StrategySlot, UiMode, MAX_SLOTS};
+use config::{AlertsConfig, Config, Direction, DcaConfig};
 use models::ticker::MiniTickerEvent;
 use strategy::dca::{DcaState, DcaStrategy, StrategySnapshot};
 use ui::tui::Tui;
@@ -30,14 +30,14 @@ async fn main() -> Result<()> {
         .with_ansi(false)
         .init();
 
-    tracing::info!("Iniciando Binance DCA Bot...");
+    tracing::info!("Starting Trading View...");
 
     // Cargar configuración
     let (config, config_path) = match Config::load() {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("\n❌ Error de configuración:\n   {}\n", e);
-            eprintln!("📝 Edita config.toml con tus claves de API de Binance");
+            eprintln!("\n❌ Configuration error:\n   {}\n", e);
+            eprintln!("📝 Edit config.toml with your Binance API keys");
             std::process::exit(1);
         }
     };
@@ -50,14 +50,26 @@ async fn main() -> Result<()> {
 
     // Test de conectividad
     client.ping().await.map_err(|e| {
-        anyhow::anyhow!("No se puede conectar con Binance: {}", e)
+        anyhow::anyhow!("Could not connect to Binance: {}", e)
     })?;
-    tracing::info!("Conectividad OK");
+    tracing::info!("Connectivity OK");
 
     // Sincronizar reloj con Binance para evitar error -1021
     client.sync_time().await.map_err(|e| {
-        anyhow::anyhow!("No se pudo sincronizar tiempo con Binance: {}", e)
+        anyhow::anyhow!("Could not synchronize time with Binance: {}", e)
     })?;
+
+    // Obtener lista de pares USDT disponibles en Binance (mainnet o testnet)
+    let available_symbols: Vec<String> = match client.get_usdt_symbols().await {
+        Ok(syms) if !syms.is_empty() => {
+            tracing::info!("{} USDT pairs obtained from Binance", syms.len());
+            syms
+        }
+        Ok(_) | Err(_) => {
+            tracing::warn!("Could not obtain pairs from Binance, using default list");
+            DEFAULT_SYMBOLS.iter().map(|s| s.to_string()).collect()
+        }
+    };
 
     // Cargar snapshots anteriores
     let snapshots = load_snapshots(&state_path);
@@ -123,6 +135,8 @@ async fn main() -> Result<()> {
         slots,
         selected_slot: 0,
         prices: HashMap::new(),
+        alert_levels: HashMap::new(),
+        symbols: available_symbols,
         log: std::collections::VecDeque::new(),
         should_quit: false,
         ui_mode,
@@ -150,7 +164,17 @@ async fn main() -> Result<()> {
     });
 
     // ----------------------------------------------------------------
-    // Tarea 2: Motor de estrategia multi-slot
+    // Tarea 2: Motor de alertas S/R (rolling window, cada 5 min)
+    // ----------------------------------------------------------------
+    {
+        let state_ref = Arc::clone(&state);
+        let client_ref = Arc::clone(&client);
+        let alerts_config = config.alerts.clone();
+        tokio::spawn(run_alert_engine(state_ref, client_ref, alerts_config));
+    }
+
+    // ----------------------------------------------------------------
+    // Tarea 3: Motor de estrategia multi-slot
     // ----------------------------------------------------------------
     {
         let state_ref = Arc::clone(&state);
@@ -177,7 +201,7 @@ async fn main() -> Result<()> {
     let mut tui = Tui::new(Arc::clone(&state), cmd_tx)?;
     tui.run().await?;
 
-    tracing::info!("Bot detenido.");
+    tracing::info!("Bot stopped.");
     Ok(())
 }
 
@@ -262,7 +286,7 @@ async fn handle_command(
         // --- Restauración de sesión ---
         AppCommand::RestoreSessionContinue => {
             let mut s = state.lock().await;
-            s.log("Sesiones anteriores restauradas. Actívalas manualmente con [S].");
+            s.log("Previous sessions restored. Activate them manually with [S].");
             s.ui_mode = UiMode::Normal;
         }
         AppCommand::RestoreSessionDiscard => {
@@ -282,7 +306,7 @@ async fn handle_command(
                     base_balance: 0.0,
                     quote_balance: 0.0,
                 });
-                s.log("Sesión anterior descartada. Comenzando desde cero.");
+                s.log("Previous session discarded. Starting from scratch.");
                 s.ui_mode = UiMode::Normal;
             }
             update_symbol_watch(state, symbol_tx).await;
@@ -311,17 +335,17 @@ async fn handle_command(
             if let Some(slot) = s.selected_mut() {
                 slot.strategy.stop();
             }
-            s.log("Estrategia detenida.");
+            s.log("Strategy stopped.");
         }
 
         // --- Modal nueva estrategia (S) ---
         AppCommand::OpenNewStrategy => {
             let mut s = state.lock().await;
-            // Pre-seleccionar un símbolo no usado
+            // Pre-seleccionar el primer símbolo no usado
             let used: Vec<String> = s.slots.iter().map(|sl| sl.symbol.clone()).collect();
-            let idx = SYMBOLS
+            let idx = s.symbols
                 .iter()
-                .position(|&sym| !used.contains(&sym.to_string()))
+                .position(|sym| !used.contains(sym))
                 .unwrap_or(0);
             s.new_strat_symbol_idx = idx;
             s.new_strat_direction = Direction::Long;
@@ -330,13 +354,18 @@ async fn handle_command(
         }
         AppCommand::NewStratSymbolUp => {
             let mut s = state.lock().await;
-            let len = SYMBOLS.len();
-            s.new_strat_symbol_idx =
-                if s.new_strat_symbol_idx == 0 { len - 1 } else { s.new_strat_symbol_idx - 1 };
+            let len = s.symbols.len();
+            if len > 0 {
+                s.new_strat_symbol_idx =
+                    if s.new_strat_symbol_idx == 0 { len - 1 } else { s.new_strat_symbol_idx - 1 };
+            }
         }
         AppCommand::NewStratSymbolDown => {
             let mut s = state.lock().await;
-            s.new_strat_symbol_idx = (s.new_strat_symbol_idx + 1) % SYMBOLS.len();
+            let len = s.symbols.len();
+            if len > 0 {
+                s.new_strat_symbol_idx = (s.new_strat_symbol_idx + 1) % len;
+            }
         }
         AppCommand::NewStratToggleDirection => {
             let mut s = state.lock().await;
@@ -355,7 +384,8 @@ async fn handle_command(
         AppCommand::NewStratConfirm => {
             let (symbol, direction, auto_restart, can_add) = {
                 let s = state.lock().await;
-                let sym = SYMBOLS[s.new_strat_symbol_idx].to_string();
+                let idx = s.new_strat_symbol_idx.min(s.symbols.len().saturating_sub(1));
+                let sym = s.symbols.get(idx).cloned().unwrap_or_else(|| "BTCUSDT".to_string());
                 let dir = s.new_strat_direction.clone();
                 let ar = s.new_strat_auto_restart;
                 let can = s.slots.len() < MAX_SLOTS;
@@ -363,7 +393,7 @@ async fn handle_command(
             };
 
             if !can_add {
-                state.lock().await.log_error("Máximo de estrategias alcanzado (4).");
+                state.lock().await.log_error("Maximum strategies reached (4).");
                 return;
             }
 
@@ -382,7 +412,7 @@ async fn handle_command(
                     Direction::Long  => "LONG",
                     Direction::Short => "SHORT",
                 };
-                s.log(&format!("Nueva estrategia: {} {} iniciada", symbol, dir_label));
+                s.log(&format!("New strategy: {} {} started", symbol, dir_label));
                 s.slots.push(StrategySlot {
                     id,
                     strategy: strat,
@@ -408,7 +438,7 @@ async fn handle_command(
                 slot.strategy.start();
             }
             s.ui_mode = UiMode::Normal;
-            s.log("Ciclo DCA reiniciado.");
+            s.log("DCA cycle restarted.");
         }
         AppCommand::PostSaleDismiss(slot_id) => {
             let mut s = state.lock().await;
@@ -451,7 +481,7 @@ async fn handle_command(
             if has_position {
                 s.ui_mode = UiMode::ConfirmClose;
             } else {
-                s.log("No hay posición abierta para cerrar.");
+                s.log("No open position to close.");
             }
         }
         AppCommand::ConfirmCloseNow => {
@@ -480,13 +510,13 @@ async fn handle_command(
             state.lock().await.ui_mode = UiMode::Normal;
 
             if qty <= 0.0 {
-                state.lock().await.log("No hay posición abierta para cerrar.");
+                state.lock().await.log("No open position to close.");
                 return;
             }
 
             let log_msg = match direction {
-                Direction::Long  => format!("⚠ CIERRE MANUAL [{}]: Vendiendo {:.6} @ ${:.2}", symbol, qty, price),
-                Direction::Short => format!("⚠ CIERRE MANUAL [{}]: Recomprando {:.6} @ ${:.2}", symbol, qty, price),
+                Direction::Long  => format!("⚠ MANUAL CLOSE [{}]: Selling {:.6} @ ${:.2}", symbol, qty, price),
+                Direction::Short => format!("⚠ MANUAL CLOSE [{}]: Rebuying {:.6} @ ${:.2}", symbol, qty, price),
             };
             state.lock().await.log(&log_msg);
 
@@ -505,13 +535,13 @@ async fn handle_command(
                             slot.strategy.clear_trades();
                         }
                         s.log(&format!(
-                            "✓ CIERRE MANUAL [{}] ejecutado. Recibido: ${:.2}",
+                            "✓ MANUAL CLOSE [{}] executed. Received: ${:.2}",
                             symbol, received
                         ));
                         s.ui_mode = UiMode::PostSale(
                             slot_id,
                             SaleResult {
-                                kind: "CIERRE MANUAL".to_string(),
+                                kind: "MANUAL CLOSE".to_string(),
                                 received,
                                 pnl,
                                 pnl_pct,
@@ -524,7 +554,7 @@ async fn handle_command(
                     state
                         .lock()
                         .await
-                        .log_error(&format!("Cierre manual [{}] falló: {}", symbol, e));
+                        .log_error(&format!("Manual close [{}] failed: {}", symbol, e));
                 }
             }
         }
@@ -543,18 +573,18 @@ async fn handle_command(
                             slot.strategy.config.quote_amount = v;
                         }
                         s.ui_mode = UiMode::Normal;
-                        s.log(&format!("Monto por operación: ${:.2} USDT (todos los slots)", v));
+                        s.log(&format!("Amount per trade: ${:.2} USDT (all slots)", v));
                     }
                     if let Err(e) = Config::save_dca(config_path, &base_config.symbol, v) {
                         state.lock().await.log_error(&format!(
-                            "No se pudo guardar config: {}",
+                            "Could not save config: {}",
                             e
                         ));
                     }
                 }
                 _ => {
                     state.lock().await.log_error(&format!(
-                        "Monto inválido: '{}' (mínimo $1)",
+                        "Invalid amount: '{}' (minimum $1)",
                         buf
                     ));
                 }
@@ -628,8 +658,8 @@ async fn evaluate_slot(
     // =====================================================================
     if should_sl && qty > 0.0 {
         let log_msg = match direction {
-            Direction::Long  => format!("⚠ STOP LOSS [{}]! Vendiendo {:.6} @ ${:.2}", symbol, qty, price),
-            Direction::Short => format!("⚠ STOP LOSS [{}]! Recomprando {:.6} @ ${:.2}", symbol, qty, price),
+            Direction::Long  => format!("⚠ STOP LOSS [{}]! Selling {:.6} @ ${:.2}", symbol, qty, price),
+            Direction::Short => format!("⚠ STOP LOSS [{}]! Re-buying {:.6} @ ${:.2}", symbol, qty, price),
         };
         state.lock().await.log(&log_msg);
 
@@ -648,7 +678,7 @@ async fn evaluate_slot(
                         slot.strategy.stop();
                         slot.strategy.clear_trades();
                     }
-                    s.log(&format!("✓ STOP LOSS [{}] ejecutado. Recibido: ${:.2}", symbol, received));
+                    s.log(&format!("✓ STOP LOSS [{}] executed. Received: ${:.2}", symbol, received));
                     s.ui_mode = UiMode::PostSale(slot_id, SaleResult {
                         kind: "STOP LOSS".to_string(),
                         received,
@@ -659,7 +689,7 @@ async fn evaluate_slot(
                 save_all_snapshots(state, state_path).await;
             }
             Err(e) => {
-                state.lock().await.log_error(&format!("Stop loss [{}] falló: {}", symbol, e));
+                state.lock().await.log_error(&format!("Stop loss [{}] failed: {}", symbol, e));
             }
         }
         return;
@@ -670,8 +700,8 @@ async fn evaluate_slot(
     // =====================================================================
     if should_tp && qty > 0.0 {
         let log_msg = match direction {
-            Direction::Long  => format!("✓ TAKE PROFIT [{}]! P&L: +${:.2}  Vendiendo {:.6} @ ${:.2}", symbol, pnl, qty, price),
-            Direction::Short => format!("✓ TAKE PROFIT [{}]! P&L: +${:.2}  Recomprando {:.6} @ ${:.2}", symbol, pnl, qty, price),
+            Direction::Long  => format!("✓ TAKE PROFIT [{}]! P&L: +${:.2}  Selling {:.6} @ ${:.2}", symbol, pnl, qty, price),
+            Direction::Short => format!("✓ TAKE PROFIT [{}]! P&L: +${:.2}  Re-buying {:.6} @ ${:.2}", symbol, pnl, qty, price),
         };
         state.lock().await.log(&log_msg);
 
@@ -694,9 +724,9 @@ async fn evaluate_slot(
                             slot.strategy.stop();
                         }
                     }
-                    s.log(&format!("✓ TAKE PROFIT [{}] ejecutado. Recibido: ${:.2}", symbol, received));
+                    s.log(&format!("✓ TAKE PROFIT [{}] executed. Received: ${:.2}", symbol, received));
                     if auto_restart {
-                        s.log("Auto-reinicio activado. Ciclo DCA reiniciado.");
+                        s.log("Auto-restart enabled. DCA cycle restarted.");
                     } else {
                         s.ui_mode = UiMode::PostSale(slot_id, SaleResult {
                             kind: "TAKE PROFIT".to_string(),
@@ -709,7 +739,7 @@ async fn evaluate_slot(
                 save_all_snapshots(state, state_path).await;
             }
             Err(e) => {
-                state.lock().await.log_error(&format!("Take profit [{}] falló: {}", symbol, e));
+                state.lock().await.log_error(&format!("Take profit [{}] failed: {}", symbol, e));
             }
         }
         return;
@@ -723,14 +753,14 @@ async fn evaluate_slot(
             Direction::Long => {
                 let drop = ((price_peak - price) / price_peak) * 100.0;
                 format!(
-                    "↓ TRAILING TP [{}]! Máx: ${:.4}  Caída: {:.2}%  P&L: +${:.2}",
+                    "↓ TRAILING TP [{}]! Max: ${:.4}  Drop: {:.2}%  P&L: +${:.2}",
                     symbol, price_peak, drop, pnl
                 )
             }
             Direction::Short => {
                 let rise = ((price - price_trough) / price_trough) * 100.0;
                 format!(
-                    "↑ TRAILING TP [{}]! Mín: ${:.4}  Subida: {:.2}%  P&L: +${:.2}",
+                    "↑ TRAILING TP [{}]! Min: ${:.4}  Rise: {:.2}%  P&L: +${:.2}",
                     symbol, price_trough, rise, pnl
                 )
             }
@@ -756,9 +786,9 @@ async fn evaluate_slot(
                             slot.strategy.stop();
                         }
                     }
-                    s.log(&format!("✓ TRAILING TP [{}] ejecutado. Recibido: ${:.2}", symbol, received));
+                    s.log(&format!("✓ TRAILING TP [{}] executed. Received: ${:.2}", symbol, received));
                     if auto_restart {
-                        s.log("Auto-reinicio activado. Ciclo DCA reiniciado.");
+                        s.log("Auto-restart enabled. DCA cycle restarted.");
                     } else {
                         s.ui_mode = UiMode::PostSale(slot_id, SaleResult {
                             kind: "TRAILING TP".to_string(),
@@ -771,7 +801,7 @@ async fn evaluate_slot(
                 save_all_snapshots(state, state_path).await;
             }
             Err(e) => {
-                state.lock().await.log_error(&format!("Trailing TP [{}] falló: {}", symbol, e));
+                state.lock().await.log_error(&format!("Trailing TP [{}] failed: {}", symbol, e));
             }
         }
         return;
@@ -792,7 +822,7 @@ async fn evaluate_slot(
                         .unwrap_or(1)
                 };
                 tracing::info!(
-                    "Ejecutando compra DCA LONG [{}] #{} de ${:.2}",
+                    "Executing DCA LONG buy [{}] #{} of ${:.2}",
                     symbol, order_num, amount
                 );
 
@@ -816,7 +846,7 @@ async fn evaluate_slot(
                         save_all_snapshots(state, state_path).await;
                     }
                     Err(e) => {
-                        state.lock().await.log_error(&format!("Compra [{}] fallida: {}", symbol, e));
+                        state.lock().await.log_error(&format!("Buy [{}] failed: {}", symbol, e));
                     }
                 }
             }
@@ -830,7 +860,7 @@ async fn evaluate_slot(
                         .unwrap_or(1)
                 };
                 tracing::info!(
-                    "Ejecutando venta DCA SHORT [{}] #{}: {:.6}",
+                    "Executing DCA SHORT sell [{}] #{}: {:.6}",
                     symbol, order_num, qty_to_sell
                 );
 
@@ -846,7 +876,7 @@ async fn evaluate_slot(
                                 let base = slot.base_asset.clone();
                                 slot.strategy.record_buy(order.order_id, actual_price, exec_qty, received);
                                 s.log(&format!(
-                                    "SHORT #{} [{}]: vendido {:.6} {} @ ${:.4} (${:.2})",
+                                    "SHORT #{} [{}]: sold {:.6} {} @ ${:.4} (${:.2})",
                                     num, symbol, exec_qty, base, actual_price, received
                                 ));
                             }
@@ -855,7 +885,7 @@ async fn evaluate_slot(
                     }
                     Err(e) => {
                         state.lock().await.log_error(&format!(
-                            "Venta SHORT [{}] fallida: {}",
+                            "SHORT Sell [{}] failed: {}",
                             symbol, e
                         ));
                     }
@@ -881,7 +911,7 @@ async fn save_all_snapshots(state: &Arc<Mutex<AppState>>, path: &std::path::Path
         s.slots.iter().map(|sl| sl.strategy.to_snapshot(&sl.symbol)).collect()
     };
     if let Err(e) = save_snapshots(&snapshots, path) {
-        tracing::warn!("No se pudo guardar estado: {}", e);
+        tracing::warn!("Could not save state: {}", e);
     }
 }
 
@@ -894,10 +924,10 @@ async fn refresh_balance(state: &Arc<Mutex<AppState>>, client: &Arc<BinanceClien
                 slot.base_balance = account.get_free(&slot.base_asset);
                 slot.quote_balance = account.get_free(&slot.quote_asset);
             }
-            tracing::debug!("Balances actualizados para {} slot(s)", s.slots.len());
+            tracing::debug!("Balances updated for {} slot(s)", s.slots.len());
         }
         Err(e) => {
-            tracing::warn!("No se pudo actualizar balance: {}", e);
+            tracing::warn!("Could not update balance: {}", e);
         }
     }
 }
@@ -924,6 +954,137 @@ fn save_snapshots(snapshots: &[StrategySnapshot], path: &std::path::Path) -> any
     let json = serde_json::to_string_pretty(snapshots)?;
     std::fs::write(path, json)?;
     Ok(())
+}
+
+/// Beep del sistema para alertas de soporte/resistencia
+fn play_alert_sound() {
+    // BEL character: la mayoría de terminales/consolas emiten un beep
+    eprint!("\x07");
+}
+
+/// Motor de alertas S/R: cada 5 minutos descarga klines, calcula soporte/resistencia
+/// con rolling window y dispara alertas cuando el precio cruza un nivel.
+async fn run_alert_engine(
+    state: Arc<Mutex<AppState>>,
+    client: Arc<BinanceClient>,
+    cfg: AlertsConfig,
+) {
+    // Primera ejecución después de 30s (dar tiempo al WebSocket para recibir precios)
+    tokio::time::sleep(Duration::from_secs(30)).await;
+
+    let mut tick = tokio::time::interval(Duration::from_secs(300)); // cada 5 minutos
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+    let limit = (cfg.rolling_window + 1) as u32; // +1 para excluir la vela actual (incompleta)
+    let cooldown = Duration::from_secs(cfg.cooldown_minutes * 60);
+
+    loop {
+        tick.tick().await;
+
+        // Obtener todos los símbolos activos
+        let symbols: Vec<String> = state.lock().await.slots.iter()
+            .map(|s| s.symbol.clone())
+            .collect();
+
+        for symbol in symbols {
+            // Descargar velas (endpoint público, sin firma)
+            let klines = match client.get_klines(&symbol, &cfg.candle_interval, limit).await {
+                Ok(k) if k.len() > 1 => k,
+                Ok(_) => continue,
+                Err(e) => {
+                    tracing::warn!("get_klines({}) error: {}", symbol, e);
+                    continue;
+                }
+            };
+
+            // Usar solo velas cerradas (excluir la última, que puede estar incompleta)
+            let completed = &klines[..klines.len() - 1];
+            let resistance = completed.iter().map(|k| k.high).fold(f64::NEG_INFINITY, f64::max);
+            let support    = completed.iter().map(|k| k.low ).fold(f64::INFINITY,     f64::min);
+
+            // Precio actual del símbolo
+            let current_price = {
+                let s = state.lock().await;
+                s.prices.get(&symbol).map(|m| m.price).unwrap_or(0.0)
+            };
+            if current_price == 0.0 { continue; }
+
+            let now = std::time::Instant::now();
+
+            // Leer precio previo y últimas alertas
+            let (prev_price, last_sup, last_res) = {
+                let s = state.lock().await;
+                let l = s.alert_levels.get(&symbol);
+                (
+                    l.map(|x| x.prev_price).unwrap_or(current_price),
+                    l.and_then(|x| x.last_support_alert),
+                    l.and_then(|x| x.last_resistance_alert),
+                )
+            };
+
+            // Detección de cruce de nivel
+            let support_broken    = current_price < support    && prev_price >= support;
+            let resistance_broken = current_price > resistance && prev_price <= resistance;
+
+            let sup_ok = last_sup.map_or(true, |t| now.duration_since(t) >= cooldown);
+            let res_ok = last_res.map_or(true, |t| now.duration_since(t) >= cooldown);
+
+            if support_broken && sup_ok {
+                let msg = format!(
+                    "[{}] Support broken! ${:.2} < Support ${:.2}",
+                    symbol, current_price, support
+                );
+                {
+                    let mut s = state.lock().await;
+                    s.log_alert(&msg);
+                    let level = s.alert_levels.entry(symbol.clone()).or_insert(AlertLevel {
+                        resistance,
+                        support,
+                        prev_price: current_price,
+                        last_support_alert: None,
+                        last_resistance_alert: None,
+                    });
+                    level.last_support_alert = Some(now);
+                }
+                play_alert_sound();
+            }
+
+            if resistance_broken && res_ok {
+                let msg = format!(
+                    "[{}] Resistance broken! ${:.2} > Resistance ${:.2}",
+                    symbol, current_price, resistance
+                );
+                {
+                    let mut s = state.lock().await;
+                    s.log_alert(&msg);
+                    let level = s.alert_levels.entry(symbol.clone()).or_insert(AlertLevel {
+                        resistance,
+                        support,
+                        prev_price: current_price,
+                        last_support_alert: None,
+                        last_resistance_alert: None,
+                    });
+                    level.last_resistance_alert = Some(now);
+                }
+                play_alert_sound();
+            }
+
+            // Actualizar niveles y precio previo para la próxima iteración
+            {
+                let mut s = state.lock().await;
+                let level = s.alert_levels.entry(symbol.clone()).or_insert(AlertLevel {
+                    resistance,
+                    support,
+                    prev_price: current_price,
+                    last_support_alert: None,
+                    last_resistance_alert: None,
+                });
+                level.resistance = resistance;
+                level.support    = support;
+                level.prev_price = current_price;
+            }
+        }
+    }
 }
 
 /// Extrae base y quote asset de un símbolo de Binance

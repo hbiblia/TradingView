@@ -7,6 +7,6 @@ if %ERRORLEVEL% neq 0 (
     pause
     exit /b 1
 )
-copy /y target\release\tradingbot.exe tradingbot.exe >nul
+copy /y target\release\tradingbot.exe bin\tradingbot.exe >nul
 echo.
 echo Listo! Binario actualizado: tradingbot.exe

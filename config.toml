@@ -19,37 +19,50 @@ testnet = false
 # Par de trading (símbolo de Binance)
 symbol = "BTCUSDT"
 
-# Cantidad en moneda de cotización (USDT) por cada compra
+# Dirección de la estrategia:
+#   "long"  = DCA LONG: compra periódicamente y vende cuando sube (comportamiento clásico)
+#   "short" = DCA SHORT: vende base asset periódicamente y recompra cuando baja
+#             REQUISITO para short: debes tener el activo base en tu cuenta (ej: BTC)
+direction = "long"
+
+# Cantidad en moneda de cotización (USDT) por cada operación
 quote_amount = 10.0
 
-# Intervalo entre compras (en minutos)
-# Ejemplo: 60 = compra cada 1 hora
+# Intervalo entre entradas (en minutos)
+# Ejemplo: 60 = entra cada 1 hora
 interval_minutes = 60
 
-# Compra adicional cuando el precio cae X% desde la última compra
-# Ejemplo: 2.0 = compra si cae 2% adicional al timer
+# Trigger de precio para entrada adicional:
+#   LONG:  entra si el precio CAE X% desde la última compra
+#   SHORT: entra si el precio SUBE X% desde la última venta
+# Ejemplo: 2.0 = entra si el precio se mueve 2% en la dirección contraria
 # 0.0 = desactivado (solo timer)
 price_drop_trigger = 2.0
 
 # Número máximo de órdenes DCA antes de pausar
 max_orders = 10
 
-# Tomar ganancias cuando el precio suba X% sobre el costo promedio
+# Take profit en % desde el precio promedio de entrada:
+#   LONG:  cierra cuando el precio sube X% sobre el costo promedio
+#   SHORT: cierra cuando el precio baja X% bajo el precio promedio de venta
 # 0.0 = desactivado
 take_profit_pct = 5.0
 
-# Stop loss cuando el precio baje X% sobre el costo promedio
+# Stop loss en % desde el precio promedio de entrada:
+#   LONG:  cierra cuando el precio baja X% bajo el costo promedio
+#   SHORT: cierra cuando el precio sube X% sobre el precio promedio de venta
 # 0.0 = desactivado
 stop_loss_pct = 15.0
 
-# Trailing Take Profit: vende cuando el precio cae X% desde su máximo,
-# pero solo si todavía hay ganancia sobre el costo promedio
-# Ejemplo: 1.5 = vende si el precio cae 1.5% desde el pico y sigue en profit
+# Trailing Take Profit:
+#   LONG:  cierra cuando el precio cae X% desde su máximo (con ganancia)
+#   SHORT: cierra cuando el precio sube X% desde su mínimo (con ganancia)
+# Ejemplo: 1.5 = cierra si retrocede 1.5% desde el extremo favorable
 # 0.0 = desactivado
 trailing_tp_pct = 1.5
 
 # Reiniciar el ciclo DCA automáticamente después de un Take Profit o Trailing TP
-# true  = reinicia solo (compra de nuevo en el siguiente tick)
+# true  = reinicia solo (entra de nuevo en el siguiente tick)
 # false = muestra una pantalla y espera que vos decidas
 auto_restart = false
 

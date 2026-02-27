@@ -173,6 +173,30 @@ impl BinanceClient {
         Ok(resp.json::<Order>().await?)
     }
 
+    /// Orden de compra a mercado usando quantity (cantidad base exacta, ej: BTC)
+    /// Usada para cerrar posiciones SHORT: recomprar la cantidad exacta vendida
+    pub async fn market_buy_qty(&self, symbol: &str, quantity: f64) -> Result<Order> {
+        let ts = self.timestamp_ms();
+        let body = format!(
+            "symbol={}&side=BUY&type=MARKET&quantity={:.8}&timestamp={}",
+            symbol, quantity, ts
+        );
+        let sig = self.sign(&body);
+        let full_body = format!("{}&signature={}", body, sig);
+
+        let url = format!("{}/api/v3/order", self.base_url);
+        let resp = self
+            .http
+            .post(&url)
+            .header("Content-Type", "application/x-www-form-urlencoded")
+            .body(full_body)
+            .send()
+            .await?;
+
+        let resp = self.check_response(resp).await?;
+        Ok(resp.json::<Order>().await?)
+    }
+
     /// Orden de venta a mercado usando quantity (cantidad base, ej: BTC)
     pub async fn market_sell_qty(&self, symbol: &str, quantity: f64) -> Result<Order> {
         let ts = self.timestamp_ms();

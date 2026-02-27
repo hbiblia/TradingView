@@ -36,6 +36,14 @@ pub struct MiniTickerEvent {
     pub quote_volume: String,
 }
 
+/// Wrapper del combined stream de Binance (multi-símbolo)
+/// Formato: {"stream":"btcusdt@miniTicker","data":{...MiniTickerEvent...}}
+#[derive(Debug, Deserialize, Clone)]
+pub struct CombinedStreamWrapper {
+    pub stream: String,
+    pub data: MiniTickerEvent,
+}
+
 impl MiniTickerEvent {
     pub fn close_f64(&self) -> f64 {
         self.close_price.parse().unwrap_or(0.0)

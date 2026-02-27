@@ -3,35 +3,47 @@ use futures_util::{SinkExt, StreamExt};
 use tokio::sync::{mpsc, watch};
 use tokio_tungstenite::{connect_async, tungstenite::Message};
 
-use crate::models::ticker::MiniTickerEvent;
+use crate::models::ticker::{CombinedStreamWrapper, MiniTickerEvent};
 
-// El testnet de Binance no soporta streams de mercado (@miniTicker).
 // Los precios son datos públicos: siempre se usa mainnet para el WebSocket.
-const MAINNET_WS: &str = "wss://stream.binance.com:9443/ws";
+const MAINNET_WS: &str = "wss://stream.binance.com:9443";
 
 /// Inicia el stream de precios vía WebSocket (@miniTicker).
-/// Se reconecta automáticamente en caso de error o cambio de símbolo.
+/// Soporta múltiples símbolos usando el combined stream de Binance.
+/// Se reconecta automáticamente en caso de error o cambio en la lista de símbolos.
 pub async fn run_price_stream(
-    mut symbol_rx: watch::Receiver<String>,
+    mut symbol_rx: watch::Receiver<Vec<String>>,
     price_tx: mpsc::Sender<MiniTickerEvent>,
 ) {
     loop {
-        let symbol = symbol_rx.borrow_and_update().clone();
-        let ws_url = format!("{}/{}@miniTicker", MAINNET_WS, symbol.to_lowercase());
+        let symbols = symbol_rx.borrow_and_update().clone();
 
-        tracing::info!("Conectando WebSocket: {}", ws_url);
+        if symbols.is_empty() {
+            let _ = symbol_rx.changed().await;
+            continue;
+        }
+
+        // Combined stream URL:
+        // wss://stream.binance.com:9443/stream?streams=btcusdt@miniTicker/ethusdt@miniTicker
+        let streams: String = symbols
+            .iter()
+            .map(|s| format!("{}@miniTicker", s.to_lowercase()))
+            .collect::<Vec<_>>()
+            .join("/");
+        let ws_url = format!("{}/stream?streams={}", MAINNET_WS, streams);
+
+        tracing::info!("Conectando WebSocket ({} símbolo(s))", symbols.len());
 
         tokio::select! {
             result = connect_and_stream(&ws_url, price_tx.clone()) => {
                 match result {
-                    Ok(_) => tracing::warn!("WebSocket cerrado limpiamente, reconectando..."),
+                    Ok(_) => tracing::warn!("WebSocket cerrado, reconectando..."),
                     Err(e) => tracing::error!("WebSocket error: {}, reconectando en 5s...", e),
                 }
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
             }
             _ = symbol_rx.changed() => {
-                tracing::info!("Símbolo cambiado, reconectando WebSocket...");
-                // reconecta inmediatamente en la siguiente iteración del loop
+                tracing::info!("Símbolos cambiados, reconectando WebSocket...");
             }
         }
     }
@@ -46,19 +58,21 @@ async fn connect_and_stream(
 
     tracing::info!("WebSocket conectado");
 
-    // Binance cierra la conexión después de 24h; necesitamos responder pings
-    // y Binance también envía pings automáticos.
     while let Some(msg) = read.next().await {
         match msg {
             Ok(Message::Text(text)) => {
-                match serde_json::from_str::<MiniTickerEvent>(&text) {
-                    Ok(event) => {
-                        // Si el canal está lleno, descartamos (no bloqueamos)
-                        let _ = price_tx.try_send(event);
-                    }
-                    Err(e) => {
-                        tracing::warn!("JSON parse error: {} | data: {}", e, &text[..text.len().min(100)]);
-                    }
+                // Intentar parsear como combined stream wrapper primero
+                let event = if let Ok(wrapper) = serde_json::from_str::<CombinedStreamWrapper>(&text) {
+                    Some(wrapper.data)
+                } else if let Ok(event) = serde_json::from_str::<MiniTickerEvent>(&text) {
+                    Some(event)
+                } else {
+                    tracing::warn!("JSON no reconocido: {}", &text[..text.len().min(120)]);
+                    None
+                };
+
+                if let Some(event) = event {
+                    let _ = price_tx.try_send(event);
                 }
             }
             Ok(Message::Ping(data)) => {

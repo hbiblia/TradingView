@@ -1,0 +1,23 @@
+# Rust
+/target/
+Cargo.lock
+
+# Binarios compilados
+*.exe
+*.dll
+*.so
+*.dylib
+
+# Archivos de ejecución
+tradingbot.log
+strategy_state.json
+
+# Carpeta de distribución (se genera al compilar con build.bat / build.sh)
+bin/
+
+# IDE / herramientas
+.vscode/
+.idea/
+*.swp
+*.swo
+*~

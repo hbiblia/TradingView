@@ -681,7 +681,7 @@ async fn evaluate_slot(
     state_path: &std::path::Path,
 ) {
     let (price, direction, should_entry, should_tp, should_sl, should_trailing_tp,
-         qty, amount, pnl, pnl_pct, auto_restart, auto_flip, symbol, price_peak, price_trough) =
+         qty, amount, pnl, pnl_pct, auto_restart, auto_flip, cooldown_minutes, symbol, price_peak, price_trough) =
     {
         let mut s = state.lock().await;
         let now = chrono::Utc::now();
@@ -723,14 +723,15 @@ async fn evaluate_slot(
         let amount         = slot.strategy.config.quote_amount;
         let pnl            = slot.strategy.pnl(price);
         let pnl_pct        = slot.strategy.pnl_pct(price);
-        let auto_restart   = slot.strategy.config.auto_restart;
-        let auto_flip      = slot.strategy.config.auto_flip;
+        let auto_restart        = slot.strategy.config.auto_restart;
+        let auto_flip           = slot.strategy.config.auto_flip;
+        let cooldown_minutes    = slot.strategy.config.restart_cooldown_minutes;
         let symbol         = slot.symbol.clone();
         let price_peak     = slot.strategy.price_peak;
         let price_trough   = slot.strategy.price_trough;
 
         (price, direction, should_entry, should_tp, should_sl, should_trailing_tp,
-         qty, amount, pnl, pnl_pct, auto_restart, auto_flip, symbol, price_peak, price_trough)
+         qty, amount, pnl, pnl_pct, auto_restart, auto_flip, cooldown_minutes, symbol, price_peak, price_trough)
     };
 
     // =====================================================================
@@ -804,7 +805,7 @@ async fn evaluate_slot(
                                 slot.strategy.config.direction = slot.strategy.config.direction.flip();
                                 flipped_to = Some(slot.strategy.config.direction.clone());
                             }
-                            slot.strategy.start();
+                            slot.strategy.start_after_tp(cooldown_minutes);
                         } else {
                             slot.strategy.stop();
                         }
@@ -879,7 +880,7 @@ async fn evaluate_slot(
                                 slot.strategy.config.direction = slot.strategy.config.direction.flip();
                                 flipped_to = Some(slot.strategy.config.direction.clone());
                             }
-                            slot.strategy.start();
+                            slot.strategy.start_after_tp(cooldown_minutes);
                         } else {
                             slot.strategy.stop();
                         }

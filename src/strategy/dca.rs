@@ -56,6 +56,8 @@ pub struct DcaStrategy {
     pub price_peak: f64,
     /// SHORT: minimum price seen while position is open (for inverse trailing TP)
     pub price_trough: f64,
+    /// Timestamp when the post-TP cooldown expires (None = no cooldown active)
+    pub cooldown_until: Option<DateTime<Utc>>,
 }
 
 impl DcaStrategy {
@@ -71,6 +73,7 @@ impl DcaStrategy {
             next_buy_in_secs: 0,
             price_peak: 0.0,
             price_trough: f64::MAX,
+            cooldown_until: None,
         }
     }
 
@@ -153,6 +156,13 @@ impl DcaStrategy {
     pub fn should_buy(&self, current_price: f64, now: DateTime<Utc>, max_daily: f64) -> bool {
         if !self.state.is_active() {
             return false;
+        }
+
+        // Cooldown post-TP
+        if let Some(until) = self.cooldown_until {
+            if now < until {
+                return false;
+            }
         }
 
         // Límite de órdenes
@@ -307,6 +317,19 @@ impl DcaStrategy {
         if self.state != DcaState::Running {
             self.last_buy_time = Some(Utc::now());
         }
+        self.cooldown_until = None;
+        self.state = DcaState::Running;
+    }
+
+    /// Restarts after a TP/Trailing TP, applying a cooldown before the first re-entry
+    pub fn start_after_tp(&mut self, cooldown_minutes: u64) {
+        let now = Utc::now();
+        self.last_buy_time = Some(now);
+        self.cooldown_until = if cooldown_minutes > 0 {
+            Some(now + chrono::Duration::minutes(cooldown_minutes as i64))
+        } else {
+            None
+        };
         self.state = DcaState::Running;
     }
 
@@ -339,10 +362,17 @@ impl DcaStrategy {
         self.price_trough = f64::MAX;
     }
 
-    /// Formats time until next entry as "MM:SS"
+    /// Formats time until next entry as "MM:SS" (shows cooldown if active)
     pub fn next_buy_countdown(&self) -> String {
         if !self.state.is_active() {
             return "--:--".to_string();
+        }
+        // During post-TP cooldown show remaining cooldown time
+        if let Some(until) = self.cooldown_until {
+            let secs = (until - Utc::now()).num_seconds().max(0);
+            if secs > 0 {
+                return format!("{:02}:{:02}", secs / 60, secs % 60);
+            }
         }
         if self.last_buy_time.is_none() {
             return "00:00".to_string();
@@ -364,6 +394,7 @@ impl DcaStrategy {
             price_trough: self.price_trough,
             has_bnb_balance: self.config.has_bnb_balance,
             state: self.state.clone(),
+            cooldown_until: self.cooldown_until,
         }
     }
 
@@ -379,6 +410,7 @@ impl DcaStrategy {
         self.price_peak = snapshot.price_peak;
         self.price_trough = snapshot.price_trough;
         self.state = snapshot.state;
+        self.cooldown_until = snapshot.cooldown_until;
     }
 }
 
@@ -408,6 +440,9 @@ pub struct StrategySnapshot {
     /// Current state of the strategy
     #[serde(default = "default_state")]
     pub state: DcaState,
+    /// Post-TP cooldown expiry timestamp (None = no cooldown)
+    #[serde(default)]
+    pub cooldown_until: Option<DateTime<Utc>>,
 }
 
 fn default_state() -> DcaState {

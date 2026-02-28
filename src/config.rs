@@ -101,6 +101,9 @@ pub struct DcaConfig {
     /// Use BNB for commissions (applies 25% discount logic if true)
     #[serde(default)]
     pub has_bnb_balance: bool,
+    /// Minutes to wait before re-entering after a TP/Trailing TP (0 = immediate)
+    #[serde(default)]
+    pub restart_cooldown_minutes: u64,
 }
 
 #[derive(Debug, Deserialize, Clone)]

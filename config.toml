@@ -10,77 +10,56 @@
 api_key    = ""
 api_secret = ""
 
-# true = use Testnet (for testing without real money)
-# false = use real Binance
+# true = usar Testnet (para pruebas sin dinero real)
+# false = usar Binance real
 testnet = false
 
 # ----------------------------------------------------------------
 [dca]
-# Trading pair (Binance symbol)
+# Par de trading (símbolo de Binance)
 symbol = "BTCUSDT"
 
-# Strategy direction:
-#   "long"  = DCA LONG: buy periodically and sell when it goes up (classic behavior)
-#   "short" = DCA SHORT: sell base asset periodically and rebuy when it goes down
-#             REQUIREMENT for short: you must have the base asset in your account (e.g.: BTC)
+# Dirección de la estrategia:
+#   "long"  = DCA LONG: compra periódicamente y vende cuando sube (comportamiento clásico)
+#   "short" = DCA SHORT: vende base asset periódicamente y recompra cuando baja
+#             REQUISITO para short: debes tener el activo base en tu cuenta (ej: BTC)
 direction = "long"
 
-# Amount in quote currency (USDT) per trade
+# Cantidad en moneda de cotización (USDT) por cada operación
 quote_amount = 10.0
 
-# Interval between entries (in minutes)
-# Example: 60 = enters every 1 hour
+# Intervalo entre entradas (en minutos)
 interval_minutes = 60
 
-# Price trigger for additional entry:
-#   LONG:  enters if the price DROPS X% from the last buy
-#   SHORT: enters if the price RISES X% from the last sell
-# Example: 2.0 = enters if the price moves 2% in the opposite direction
-# 0.0 = disabled (timer only)
+# Trigger de precio para entrada adicional:
+#   LONG:  entra si el precio CAE X% desde la última compra
+#   SHORT: entra si el precio SUBE X% desde la última venta
+# 0.0 = desactivado
 price_drop_trigger = 2.0
 
-# Maximum number of DCA orders before pausing
+# Número máximo de órdenes DCA antes de pausar
 max_orders = 10
 
-# Take profit in % from average entry price:
-#   LONG:  closes when the price rises X% above average cost
-#   SHORT: closes when the price falls X% below average sell price
-# 0.0 = disabled
+# Take profit en % desde el precio promedio de entrada
+# 0.0 = desactivado
 take_profit_pct = 5.0
 
-# Stop loss in % from average entry price:
-#   LONG:  closes when the price drops X% below average cost
-#   SHORT: closes when the price rises X% above average sell price
-# 0.0 = disabled
+# Stop loss en % desde el precio promedio de entrada
+# 0.0 = desactivado
 stop_loss_pct = 15.0
 
-# Trailing Take Profit:
-#   LONG:  closes when the price drops X% from its maximum (with profit)
-#   SHORT: closes when the price rises X% from its minimum (with profit)
-# Example: 1.5 = closes if it retreats 1.5% from the favorable extreme
-# 0.0 = disabled
+# Trailing Take Profit (retroceso desde el extremo favorable)
+# 0.0 = desactivado
 trailing_tp_pct = 1.5
 
-# Restart DCA cycle automatically after a Take Profit or Trailing TP
-# true  = restarts alone (enters again on the next tick)
-# false = shows a screen and waits for you to decide
+# Reiniciar el ciclo DCA automáticamente después de un Take Profit o Trailing TP
 auto_restart = false
+
+# Minutos de espera antes de volver a comprar después de un TP (0 = inmediato)
+# Recomendado: 30-120 minutos para que el precio se estabilice y el balance se actualice
+restart_cooldown_minutes = 60
 
 # ----------------------------------------------------------------
 [risk]
-# Maximum USDT spend per day (capital protection)
+# Gasto máximo en USDT por día (protección de capital)
 max_daily_spend = 100.0
-
-# ----------------------------------------------------------------
-[alerts]
-# Number of closed candles used to calculate support and resistance.
-# Support = minimum of the lows | Resistance = maximum of the highs
-rolling_window = 20
-
-# Candle timeframe: "1m" "5m" "15m" "1h" "4h" "1d"
-# "1h" is a good balance between sensitivity and noise
-candle_interval = "1h"
-
-# Minimum minutes between two alerts of the same type for the same symbol.
-# Prevents spam when price fluctuates near a level.
-cooldown_minutes = 30
